@@ -1,11 +1,9 @@
-description: "bot.py修正版 - 環境変数エラーメッセージとget_profile_summary()呼び出しを修正"
-path: "/mnt/user-data/outputs/bot_fixed.py"
-file_text: """
+"""
 bot.py — Shiori Discord Bot メインモジュール
 
 修正内容:
 - 54-56行目: エラーメッセージから「in .env」を削除（Railway対応）
-- 211-213行目: get_profile_summary()の引数を修正
+- 211行目: get_profile_summary()の引数を修正
   - message.author.id → message.author.name
   - 不要な第2引数（self._member_profiles）を削除
 """
@@ -281,4 +279,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""
