@@ -108,7 +108,7 @@ class ShioriBot(discord.Client):
     async def on_ready(self) -> None:
         """Bot起動完了"""
         logger.info("Shiori is online: %s (ID: %s)", self.user, self.user.id)
-        logger.info("Predictions in ledger: %d", self.predictions.count)
+        # logger.info("Predictions in ledger: %d", self.predictions.count)  # TODO: Implement count property
         logger.info("Connected to %d guilds", len(self.guilds))
 
     async def on_message(self, message: discord.Message) -> None:
