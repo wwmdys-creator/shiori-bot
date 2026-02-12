@@ -27,10 +27,7 @@ class LLMClient:
         self,
         system_prompt: str,
         user_message: str,
-        context: Optional[List[Dict[str, str]]] = None,
-        trust_level: Optional[int] = None,  # 互換性のため受け取るが使用しない
-        max_tokens: int = 2000,
-        temperature: float = 1.0
+        **kwargs  # 任意の追加引数を受け入れる
     ) -> str:
         """
         Generate response with optional conversation context.
@@ -38,16 +35,22 @@ class LLMClient:
         Args:
             system_prompt: System instruction (character definition)
             user_message: User's message
-            context: Optional list of previous messages for conversation context
-                    If provided, will use multi-turn conversation mode
-            trust_level: Optional trust level (1-5). For compatibility only; 
-                        tone guidance should be included in system_prompt by caller.
-            max_tokens: Maximum tokens in response
-            temperature: Sampling temperature
+            **kwargs: Additional arguments (context, trust_level, channel_name, etc.)
+                     - context: Optional list of previous messages
+                     - trust_level: Optional trust level (1-5)
+                     - channel_name: Optional channel name
+                     - max_tokens: Maximum tokens (default 2000)
+                     - temperature: Sampling temperature (default 1.0)
             
         Returns:
             Generated text response
         """
+        # Extract known arguments
+        context = kwargs.get('context')
+        max_tokens = kwargs.get('max_tokens', 2000)
+        temperature = kwargs.get('temperature', 1.0)
+        # trust_level, channel_name, etc. are accepted but not used
+        
         # If context is provided, use context-aware generation
         if context:
             # Append current user message to context
