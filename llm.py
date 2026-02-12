@@ -23,33 +23,39 @@ class LLMClient:
         self.client = AsyncAnthropic(api_key=api_key)  # ← 非同期版に変更
         self.model = model
     
-    async def generate_response(
-        self,
-        system_prompt: str,
-        user_message: str,
-        **kwargs  # 任意の追加引数を受け入れる
-    ) -> str:
+    async def generate_response(self, **kwargs) -> str:
         """
         Generate response with optional conversation context.
         
+        Accepts all arguments as kwargs for maximum compatibility with bot.py.
+        
         Args:
-            system_prompt: System instruction (character definition)
-            user_message: User's message
-            **kwargs: Additional arguments (context, trust_level, channel_name, etc.)
-                     - context: Optional list of previous messages
-                     - trust_level: Optional trust level (1-5)
-                     - channel_name: Optional channel name
-                     - max_tokens: Maximum tokens (default 2000)
-                     - temperature: Sampling temperature (default 1.0)
+            **kwargs: All arguments as keyword arguments
+                Required:
+                    - user_message: User's message
+                Optional:
+                    - system_prompt: System instruction (uses default if not provided)
+                    - context: List of previous messages
+                    - trust_level: Trust level (1-5)
+                    - channel_name: Channel name
+                    - nudge_hint: Nudge hint text
+                    - max_tokens: Maximum tokens (default 2000)
+                    - temperature: Sampling temperature (default 1.0)
             
         Returns:
             Generated text response
         """
-        # Extract known arguments
+        # Extract required arguments
+        user_message = kwargs.get('user_message')
+        if not user_message:
+            raise ValueError("user_message is required")
+        
+        # Extract optional arguments with defaults
+        system_prompt = kwargs.get('system_prompt', self._get_default_system_prompt())
         context = kwargs.get('context')
         max_tokens = kwargs.get('max_tokens', 2000)
         temperature = kwargs.get('temperature', 1.0)
-        # trust_level, channel_name, etc. are accepted but not used
+        # trust_level, channel_name, nudge_hint, etc. are accepted but not used here
         
         # If context is provided, use context-aware generation
         if context:
@@ -81,6 +87,12 @@ class LLMClient:
             logger.error(f"Error in generate_response: {e}")
             # Q23: エラー時はキャラ口調で
             return "あっ、すみません……ちょっと考えがまとまらなくて💦 もう一度話しかけてもらえますか？"
+    
+    def _get_default_system_prompt(self) -> str:
+        """Get default system prompt if none provided."""
+        return """あなたは栞（Shiori）です。2045年の東京大学の歴史学生で、
+2025-2026年のシンギュラリティ前夜の未来予測を記録するため時間遡行中です。
+丁寧だが親しみやすい口調で、好奇心旺盛に質問してください。"""
     
     async def generate_with_context(
         self,
