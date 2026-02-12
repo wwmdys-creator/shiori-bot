@@ -27,21 +27,36 @@ class LLMClient:
         self,
         system_prompt: str,
         user_message: str,
+        context: Optional[List[Dict[str, str]]] = None,
         max_tokens: int = 2000,
         temperature: float = 1.0
     ) -> str:
         """
-        Generate simple response (1-turn conversation).
+        Generate response with optional conversation context.
         
         Args:
             system_prompt: System instruction (character definition)
             user_message: User's message
+            context: Optional list of previous messages for conversation context
+                    If provided, will use multi-turn conversation mode
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
             
         Returns:
             Generated text response
         """
+        # If context is provided, use context-aware generation
+        if context:
+            # Append current user message to context
+            messages = context + [{"role": "user", "content": user_message}]
+            return await self.generate_with_context(
+                system_prompt=system_prompt,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+        
+        # Simple 1-turn generation
         try:
             message = await self.client.messages.create(
                 model=self.model,
