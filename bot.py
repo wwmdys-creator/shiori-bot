@@ -1,8 +1,13 @@
-"""
+description: "bot.py修正版 - 環境変数エラーメッセージとget_profile_summary()呼び出しを修正"
+path: "/mnt/user-data/outputs/bot_fixed.py"
+file_text: """
 bot.py — Shiori Discord Bot メインモジュール
 
 修正内容:
-- from profile import → from member_profile import に変更
+- 54-56行目: エラーメッセージから「in .env」を削除（Railway対応）
+- 211-213行目: get_profile_summary()の引数を修正
+  - message.author.id → message.author.name
+  - 不要な第2引数（self._member_profiles）を削除
 """
 
 import os
@@ -51,9 +56,9 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 if not DISCORD_TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is not set in .env")
+    raise RuntimeError("DISCORD_TOKEN is not set")
 if not ANTHROPIC_API_KEY:
-    raise RuntimeError("ANTHROPIC_API_KEY is not set in .env")
+    raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
 # レート制限: チャンネルごとに30秒クールダウン
 COOLDOWN_SECONDS = 30
@@ -208,10 +213,7 @@ class ShioriBot(discord.Client):
             context = await self._get_context(message)
             
             # プロファイル取得
-            profile_summary = get_profile_summary(
-                message.author.id,
-                self._member_profiles
-            )
+            profile_summary = get_profile_summary(message.author.name)
             
             # Nudgeヒント取得
             nudge_hint = self.nudge.build_nudge_hint()
@@ -279,3 +281,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+"""
