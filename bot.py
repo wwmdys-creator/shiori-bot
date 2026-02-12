@@ -88,7 +88,7 @@ class ShioriBot(discord.Client):
         self.llm = LLMClient(api_key=ANTHROPIC_API_KEY)
         self.trust = TrustManager()
         self.predictions = PredictionLedger()
-        self.nudge = NudgeManager()
+        self.nudge = NudgeManager(self)
         # self.monitor = PassiveMonitor()  # TODO: Implement PassiveMonitor
 
         # レート制限: channel_id -> last_response_timestamp
