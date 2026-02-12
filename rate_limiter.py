@@ -1,7 +1,7 @@
 """
 rate_limiter.py - レート制限モジュール
 
-Q17: B案 - チャンネルごとに30秒のクールダウン
+Q17: B案 - チャンネルごとに5秒のクールダウン
 連続メンションへの対応を制御
 """
 
@@ -19,7 +19,7 @@ class RateLimiter:
     クールダウン期間中は応答を控える
     """
     
-    def __init__(self, cooldown_seconds: int = 30):
+    def __init__(self, cooldown_seconds: int = 5):
         """
         Args:
             cooldown_seconds: クールダウン秒数（デフォルト30秒）
