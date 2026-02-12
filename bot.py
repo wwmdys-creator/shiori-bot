@@ -126,9 +126,8 @@ class ShioriBot(discord.Client):
         # )
         
         # 活動記録をnudgeにも反映
-        self.nudge.record_activity(
-            user_id=message.author.id,
-            username=message.author.name
+        self.nudge.update_activity(
+            user_id=message.author.name  # NudgeManagerは内部でusernameをキーに使用
         )
 
         # 応答すべきか判定
