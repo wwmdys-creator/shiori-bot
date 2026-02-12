@@ -18,7 +18,7 @@ import discord
 from llm import LLMClient
 from trust import TrustManager
 from predictions import PredictionLedger
-from passive_monitor import PassiveMonitor
+# from passive_monitor import PassiveMonitor  # TODO: Implement PassiveMonitor
 from nudge import NudgeManager
 from member_profile import load_member_profiles, get_profile_summary
 from summarizer import build_summary_prompt, extract_urls, fetch_page
@@ -86,7 +86,7 @@ class ShioriBot(discord.Client):
         self.trust = TrustManager()
         self.predictions = PredictionLedger()
         self.nudge = NudgeManager()
-        self.monitor = PassiveMonitor()
+        # self.monitor = PassiveMonitor()  # TODO: Implement PassiveMonitor
 
         # レート制限: channel_id -> last_response_timestamp
         self._cooldowns: dict[int, float] = defaultdict(float)
@@ -118,11 +118,12 @@ class ShioriBot(discord.Client):
             return
 
         # 全メッセージで受動監視（活動記録）
-        self.monitor.record_activity(
-            user_id=message.author.id,
-            username=message.author.name,
-            channel_id=message.channel.id
-        )
+        # TODO: Implement PassiveMonitor.record_activity
+        # self.monitor.record_activity(
+        #     user_id=message.author.id,
+        #     username=message.author.name,
+        #     channel_id=message.channel.id
+        # )
         
         # 活動記録をnudgeにも反映
         self.nudge.record_activity(
