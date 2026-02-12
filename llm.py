@@ -28,6 +28,7 @@ class LLMClient:
         system_prompt: str,
         user_message: str,
         context: Optional[List[Dict[str, str]]] = None,
+        trust_level: Optional[int] = None,  # 互換性のため受け取るが使用しない
         max_tokens: int = 2000,
         temperature: float = 1.0
     ) -> str:
@@ -39,6 +40,8 @@ class LLMClient:
             user_message: User's message
             context: Optional list of previous messages for conversation context
                     If provided, will use multi-turn conversation mode
+            trust_level: Optional trust level (1-5). For compatibility only; 
+                        tone guidance should be included in system_prompt by caller.
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
             
