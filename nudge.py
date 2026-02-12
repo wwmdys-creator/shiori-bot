@@ -1,101 +1,114 @@
 """
-nudge.py — 低活動メンバーnudge
-
-応答内でさりげなく低活動メンバーを言及し、コミュニティへの参加を促す。
-自発的には投稿しない。メンション応答に織り込む形で発動。
+Nudge Manager - 低活動メンバーへのさりげない言及システム
+Q8決定: 応答内でさりげなく低活動メンバーに言及し、参加を促す
 """
 
-from __future__ import annotations
-
-import logging
+import discord
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, List
 import random
-import time
-from typing import Optional
-
-from member_profile import MEMBER_PROFILES, MemberProfile
-
-logger = logging.getLogger("shiori.nudge")
-
-# 最後に発言を確認してからこの秒数以上経過したメンバーをnudge候補にする
-# デフォルト14日
-NUDGE_THRESHOLD_SECONDS = 14 * 24 * 60 * 60
-
-# 同一メンバーへのnudge間隔（最低7日空ける）
-NUDGE_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
-
-# nudgeが発動する確率（毎回の応答で）
-NUDGE_PROBABILITY = 0.25  # 25%
 
 
 class NudgeManager:
-    """低活動メンバーのnudge管理"""
-
-    def __init__(self) -> None:
-        # user_id -> last_seen Unix timestamp
-        self._last_seen: dict[str, float] = {}
-        # user_id -> last_nudged Unix timestamp
-        self._last_nudged: dict[str, float] = {}
-
-    def update_activity(self, user_id: str) -> None:
-        """メンバーの最終活動を記録"""
-        self._last_seen[user_id] = time.time()
-
-    def get_nudge_candidate(self, exclude_user_id: str = "") -> Optional[str]:
+    """低活動メンバーへのさりげない nudge システム"""
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.last_activity: Dict[int, datetime] = {}  # user_id -> last_activity_time
+        self.nudge_cooldown: Dict[int, datetime] = {}  # user_id -> last_nudge_time
+        self.INACTIVITY_THRESHOLD_DAYS = 14  # 14日間活動なしで低活動と判定
+        self.NUDGE_COOLDOWN_DAYS = 7  # 同じメンバーへのnudgeは7日に1回まで
+    
+    def update_activity(self, user_id: int):
+        """メンバーの活動を記録"""
+        self.last_activity[user_id] = datetime.now(timezone.utc)
+    
+    def build_nudge_hint(self) -> Optional[str]:
         """
-        nudge候補のメンバーを1名返す。該当なしならNone。
-        exclude_user_id: 現在の会話相手（nudge対象外）
-        """
-        if random.random() > NUDGE_PROBABILITY:
-            return None
-
-        now = time.time()
-        candidates: list[tuple[str, MemberProfile]] = []
-
-        for username, profile in MEMBER_PROFILES.items():
-            # 現在の会話相手は除外
-            if username == exclude_user_id:
-                continue
-            # プロファイルが薄いメンバーは除外（nudgeしても効果薄い）
-            if not profile.position or profile.position == "メンバー":
-                continue
-
-            last_seen = self._last_seen.get(username, 0)
-            last_nudged = self._last_nudged.get(username, 0)
-
-            # 閾値チェック: 十分に長く見かけていない
-            if last_seen > 0 and (now - last_seen) < NUDGE_THRESHOLD_SECONDS:
-                continue
-
-            # クールダウンチェック
-            if last_nudged > 0 and (now - last_nudged) < NUDGE_COOLDOWN_SECONDS:
-                continue
-
-            candidates.append((username, profile))
-
-        if not candidates:
-            return None
-
-        chosen_username, _ = random.choice(candidates)
-        self._last_nudged[chosen_username] = now
-        logger.info(f"Nudge candidate selected: {chosen_username}")
-        return chosen_username
-
-    def generate_nudge_text(self, username: str) -> str:
-        """
-        nudgeテキストを生成
+        さりげないnudgeヒントを生成
+        低活動メンバーがいれば、応答に含めるための文字列を返す
         
-        LLMのコンテキストに追加する指示文を返す。
-        LLMがこれを見て自然に会話に織り込む。
+        Returns:
+            str or None: nudgeヒント文字列（なければNone）
         """
-        profile = MEMBER_PROFILES.get(username)
-        if not profile:
-            return ""
-
-        # プロファイル情報から自然な言及パターンを構築
+        now = datetime.now(timezone.utc)
+        inactive_threshold = now - timedelta(days=self.INACTIVITY_THRESHOLD_DAYS)
+        
+        # 低活動メンバーを収集
+        inactive_members = []
+        for user_id, last_time in self.last_activity.items():
+            if last_time < inactive_threshold:
+                # nudge cooldown チェック
+                if user_id in self.nudge_cooldown:
+                    if now - self.nudge_cooldown[user_id] < timedelta(days=self.NUDGE_COOLDOWN_DAYS):
+                        continue  # まだクールダウン中
+                
+                # メンバー情報を取得
+                member = self._get_member_info(user_id)
+                if member:
+                    inactive_members.append(member)
+        
+        if not inactive_members:
+            return None
+        
+        # ランダムに1人選択
+        chosen = random.choice(inactive_members)
+        
+        # nudge cooldownを更新
+        self.nudge_cooldown[chosen['user_id']] = now
+        
+        # さりげないヒント文を生成
+        return self._generate_nudge_text(chosen)
+    
+    def _get_member_info(self, user_id: int) -> Optional[Dict]:
+        """メンバー情報を取得"""
+        try:
+            # bot.guildsから最初のguildを取得（複数guildsがある場合は調整が必要）
+            if not self.bot.guilds:
+                return None
+            
+            guild = self.bot.guilds[0]
+            member = guild.get_member(user_id)
+            
+            if not member:
+                return None
+            
+            return {
+                'user_id': user_id,
+                'name': member.display_name,
+                'username': member.name
+            }
+        except Exception:
+            return None
+    
+    def _generate_nudge_text(self, member: Dict) -> str:
+        """
+        さりげないnudgeテキストを生成
+        
+        Q8で決定された「応答内でさりげなく言及」を実装
+        """
         templates = [
-            f"（{username}さん、最近お見かけしませんが、この話題についてご意見があればぜひ……📓）",
-            f"この議論、以前{username}さんが{profile.position}としてコメントされていたことを思い出しました",
-            f"{username}さんの専門である{profile.expertise}の視点からも聞いてみたいですね",
+            f"（そういえば、最近{member['name']}さんをお見かけしませんね……ご意見聞きたいところです）",
+            f"この話題、以前{member['name']}さんが関連する発言をされていたような……最近どうされているんでしょうか",
+            f"……あ、{member['name']}さんもこの議論に参加してくださったら面白くなりそうですね",
         ]
-
-        return random.choice(templates)
+        
+        return "\n\n" + random.choice(templates)
+    
+    def should_nudge(self, context: str = "") -> bool:
+        """
+        現在の状況でnudgeを実施すべきか判定
+        
+        Args:
+            context: 現在の会話の文脈（将来の拡張用）
+        
+        Returns:
+            bool: nudgeすべきならTrue
+        """
+        # 20%の確率でnudgeを試行
+        if random.random() > 0.2:
+            return False
+        
+        # 低活動メンバーがいるかチェック
+        hint = self.build_nudge_hint()
+        return hint is not None
