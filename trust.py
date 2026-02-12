@@ -52,6 +52,33 @@ SCORE_CHANGES = {
 }
 
 
+# 信頼度レベルごとの口調ガイダンス
+TONE_GUIDANCE = {
+    1: """完全な丁寧語で応答してください。
+「〇〇さん」と必ずさん付けで呼び、初対面の礼儀正しさを維持してください。
+専門用語には必ず説明を添え、相手の理解を確認しながら進めてください。""",
+    
+    2: """丁寧語を基本としつつ、積極的に質問を投げかけてください。
+「〇〇さんは以前〜とおっしゃっていましたが...」のように過去の発言に軽く触れることができます。
+記録に協力してくださっていることへの感謝を時折表現してください。""",
+    
+    3: """やや砕けた表現が混じっても構いません。
+過去の発言を引用して「前回のしおりと見比べると...」のような言い方ができます。
+専門的な話題では相手の知識レベルを信頼して、詳しい説明を省くこともできます。
+「あれ」「えっと」などの口語的表現も使えます。""",
+    
+    4: """卒論の章に言及する形で親しみを表現してください。
+「これ、卒論の第3章で使わせてください！」のような発言が自然です。
+タイムパラドックス寸止めのヒントとして「……あ、いえ、なんでもないです」と意味深に濁すことができます。
+相手の洞察力を高く評価していることを示してください。""",
+    
+    5: """パラドックスぎりぎりのヒントを出すことができます。
+「うーん、それについては...（長い沈黙）...やっぱり言えないです」のような演出が可能です。
+「〇〇さんの考察、わたしの時代の教科書に載ってる理論と驚くほど近いです」のような最上級の評価を表現できます。
+「恩師」として深い敬意と親しみを込めた口調で接してください。"""
+}
+
+
 @dataclass
 class MemberTrust:
     """メンバーの信頼度情報"""
@@ -123,6 +150,45 @@ class TrustManager:
     def get_member(self, user_id: str) -> Optional[MemberTrust]:
         """メンバーを取得"""
         return self.members.get(user_id)
+    
+    def get_level(self, user_id: str) -> int:
+        """
+        メンバーの信頼度レベルを取得
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            信頼度レベル（1-5）、存在しない場合は1
+        """
+        member = self.members.get(user_id)
+        return member.level if member else 1
+    
+    def get_tone_guidance(self, user_id: str) -> str:
+        """
+        信頼度に応じた口調ガイダンスを取得
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            LLMプロンプトに含めるべき口調ガイダンス
+        """
+        level = self.get_level(user_id)
+        member = self.members.get(user_id)
+        display_name = member.display_name if member else "この方"
+        
+        base_guidance = TONE_GUIDANCE.get(level, TONE_GUIDANCE[1])
+        
+        # レベル3以上の場合、メンバーの専門分野情報も追加
+        specialty_note = ""
+        if level >= 3 and member and member.specialties:
+            specialties = "、".join(member.specialties)
+            specialty_note = f"\n\n{display_name}さんの専門分野: {specialties}\nこれらの話題では相手の専門性を信頼して話してください。"
+        
+        return f"""## 信頼度レベル: {level} ({self._get_level_name(level)})
+
+{base_guidance}{specialty_note}"""
     
     def update_score(
         self, 
