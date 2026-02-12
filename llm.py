@@ -59,8 +59,22 @@ class LLMClient:
         
         # If context is provided, use context-aware generation
         if context:
-            # Append current user message to context
-            messages = context + [{"role": "user", "content": user_message}]
+            # bot.pyからのcontext形式をAnthropic API形式に変換
+            # 入力: [{"author": "...", "content": "...", "timestamp": "..."}, ...]
+            # 出力: [{"role": "user/assistant", "content": "..."}, ...]
+            messages = []
+            for ctx in context:
+                # 栞の発言はassistant、それ以外はuser
+                role = "assistant" if ctx.get("author") in ["栞", "Shiori", "📎栞｜フィールドノート"] else "user"
+                content = ctx.get("content", "")
+                if content:  # 空でないcontentのみ追加
+                    messages.append({
+                        "role": role,
+                        "content": content
+                    })
+            # 現在のユーザーメッセージを追加
+            messages.append({"role": "user", "content": user_message})
+            
             return await self.generate_with_context(
                 system_prompt=system_prompt,
                 messages=messages,

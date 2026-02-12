@@ -190,6 +190,33 @@ class TrustManager:
 
 {base_guidance}{specialty_note}"""
     
+    def record_interaction(self, user_id: str, interaction_type: str):
+        """
+        インタラクションを記録（bot.pyからの呼び出し用）
+        
+        Args:
+            user_id: ユーザーID
+            interaction_type: インタラクションの種類
+                - "mention": メンション（話しかける）
+                - "reply": 返信
+                - その他のアクションタイプ
+        """
+        # メンバーが存在しない場合は作成
+        if user_id not in self.members:
+            self.get_or_create_member(user_id)
+        
+        # interaction_typeをaction名にマッピング
+        action_mapping = {
+            "mention": "talk_to_shiori",
+            "reply": "talk_to_shiori",
+            "prediction": "post_prediction",
+            "answer": "answer_question",
+            "summary_request": "request_summary",
+        }
+        
+        action = action_mapping.get(interaction_type, "talk_to_shiori")
+        self.update_score(user_id, action, reason=f"{interaction_type}による記録")
+    
     def update_score(
         self, 
         user_id: str, 
