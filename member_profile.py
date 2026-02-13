@@ -533,3 +533,65 @@ class MemberProfileManager:
                 related.append(profile)
 
         return related
+
+    def get_member_summary_for_highlight(self, name):
+        """メンバー名からハイライト用の要約を返す。
+
+        メンバーについて質問された時にコンテキストとして使用。
+
+        Args:
+            name: メンバー名（display_name, username, または旧名）
+
+        Returns:
+            str or None: メンバーの要約。見つからない場合はNone。
+        """
+        # 名前でプロファイルを検索
+        profile = self.get_profile(display_name=name)
+        
+        if not profile:
+            return None
+        
+        # 要約を構築
+        parts = []
+        
+        display_name = profile.get("display_name", name)
+        parts.append(f"【{display_name}】")
+        
+        # Tier
+        tier = profile.get("tier")
+        if tier:
+            parts.append(f"Tier {tier}")
+        
+        # ポジション/役割
+        position = profile.get("position")
+        if position:
+            parts.append(position)
+        
+        # 専門領域
+        expertise = profile.get("expertise")
+        if expertise:
+            # 長すぎる場合は切り詰め
+            if len(expertise) > 100:
+                expertise = expertise[:97] + "..."
+            parts.append(f"関心領域: {expertise}")
+        
+        # 思想的特徴
+        ideology = profile.get("ideology")
+        if ideology:
+            if len(ideology) > 150:
+                ideology = ideology[:147] + "..."
+            parts.append(f"思想: {ideology}")
+        
+        # 発言スタイル
+        style = profile.get("style")
+        if style:
+            if len(style) > 100:
+                style = style[:97] + "..."
+            parts.append(f"スタイル: {style}")
+        
+        # notes（補足情報）
+        notes = profile.get("notes")
+        if notes and len(notes) < 100:
+            parts.append(f"備考: {notes}")
+        
+        return " / ".join(parts) if len(parts) > 1 else None
