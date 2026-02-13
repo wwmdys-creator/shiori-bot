@@ -352,6 +352,19 @@ class ShioriBot(discord.Client):
             channel_overrides=overrides,
             community_knowledge=community_knowledge,
         )
+        
+        # デバッグ: システムプロンプトに橋が含まれているか確認
+        if "橋" in system_prompt:
+            logger.info("System prompt contains 橋 ✓")
+        else:
+            logger.warning("System prompt does NOT contain 橋 ✗")
+        logger.info(f"System prompt length: {len(system_prompt)}")
+        
+        # デバッグ: §11の新しい説明が含まれているか確認
+        if "メンバーについて質問されたら" in system_prompt:
+            logger.info("System prompt has new §11 instructions ✓")
+        else:
+            logger.warning("System prompt is MISSING new §11 instructions ✗")
 
         # 動的コンテキスト注入
         if prediction_context:
