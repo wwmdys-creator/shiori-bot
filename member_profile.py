@@ -44,7 +44,10 @@ class MemberProfileManager:
 
     async def _load_profiles(self) -> None:
         """members_extended.md を読み込む。"""
+        # v4.5: data/サブディレクトリがない場合はルートから読み込む
         filepath = Path("data/members_extended.md")
+        if not filepath.exists():
+            filepath = Path("members_extended.md")
 
         if not filepath.exists():
             logger.info("members_extended.md not found, using empty profiles")
@@ -54,40 +57,96 @@ class MemberProfileManager:
             content = filepath.read_text(encoding="utf-8")
             self.profiles = self._parse_profiles(content)
             self._build_user_id_map()
-            logger.info(f"Loaded {len(self.profiles)} profiles")
+            logger.info(f"Loaded {len(self.profiles)} profiles from {filepath}")
         except Exception as e:
             logger.error(f"Failed to load profiles: {e}")
 
     def _parse_profiles(self, content: str) -> dict[str, dict]:
-        """members_extended.md をパースする。"""
+        """members_extended.md をパースする。
+        
+        v4.5対応: 実際のmembers_extended.mdフォーマットに対応
+        """
         profiles = {}
 
-        # フォーマット例:
-        # ## Rom🧄
-        # - user_id: 123456789
-        # - tier: A
-        # - expertise: ニュースキュレーション、AI動向
-        # - prediction_topics: AGI時期、AI規制
-        # - notes: 毎日ニュースを投稿。情報の早さに定評
+        # フォーマット例（v4.5 members_extended.md）:
+        # ### Rom🧄（katsucurry_apple）
+        # 
+        # - **user_id**: katsucurry_apple
+        # - **表示名**: Rom🧄
+        # - **投稿数**: 907件（未来予測ch）
+        # - **ポジション**: サーバー最多投稿者...
+        # - **思想的特徴**: 楽観的だが...
+        # - **関心領域**: トランスヒューマニズム、...
+        # - **発言スタイル**: 語尾に「〜っピ」...
+        # - **代表的主張**: ...
+        # - **栞の役割保護**: ...
 
-        pattern = r"## ([^\n]+)\n((?:- .+\n?)+)"
+        # ### で始まるセクションを抽出（Tier見出しは除外）
+        # 「### 動的メモ」や「## Tier-」は除外
+        pattern = r"### ([^（\n]+)(?:（([^）]+)）)?\n\n((?:- .+\n?)+)"
         matches = re.findall(pattern, content)
 
-        for username, block in matches:
-            username = username.strip()
-            profile = {"display_name": username}
+        for display_name, username, block in matches:
+            display_name = display_name.strip()
+            username = username.strip() if username else display_name
+            
+            # 「動的メモ」セクションはスキップ
+            if display_name == "動的メモ":
+                continue
+            
+            profile = {
+                "display_name": display_name,
+                "username": username,
+            }
 
             for line in block.strip().split("\n"):
                 if line.startswith("- "):
-                    key_val = line[2:].split(": ", 1)
-                    if len(key_val) == 2:
-                        key, val = key_val
-                        if key == "user_id":
-                            profile[key] = int(val)
+                    # "- **key**: value" 形式をパース
+                    line_content = line[2:]  # "- " を除去
+                    
+                    # **key**: value 形式
+                    bold_match = re.match(r"\*\*([^*]+)\*\*:\s*(.+)", line_content)
+                    if bold_match:
+                        key = bold_match.group(1).strip()
+                        val = bold_match.group(2).strip()
+                    else:
+                        # key: value 形式（フォールバック）
+                        key_val = line_content.split(": ", 1)
+                        if len(key_val) == 2:
+                            key, val = key_val
+                            key = key.strip()
+                            val = val.strip()
                         else:
-                            profile[key] = val.strip()
+                            continue
+                    
+                    # キー名を正規化
+                    key_mapping = {
+                        "user_id": "user_id",
+                        "表示名": "display_name",
+                        "投稿数": "post_count",
+                        "ポジション": "position",
+                        "思想的特徴": "ideology",
+                        "関心領域": "expertise",  # expertiseにマッピング
+                        "発言スタイル": "style",
+                        "代表的主張": "claims",
+                        "栞の役割保護": "protection",
+                        "チャンネル横断": "channels",
+                        "通称": "nickname",
+                        "愛称": "nickname",
+                        # v4.1以前のキーもサポート
+                        "tier": "tier",
+                        "expertise": "expertise",
+                        "prediction_topics": "prediction_topics",
+                        "notes": "notes",
+                    }
+                    
+                    normalized_key = key_mapping.get(key, key.lower().replace(" ", "_"))
+                    profile[normalized_key] = val
 
-            profiles[username] = profile
+            # display_nameをキーにして保存（usernameでも検索可能にする）
+            profiles[display_name] = profile
+            if username and username != display_name:
+                profiles[username] = profile
 
         return profiles
 
@@ -101,7 +160,10 @@ class MemberProfileManager:
 
     async def _load_lexicon(self) -> None:
         """community_lexicon.md を読み込む。"""
+        # v4.5: data/サブディレクトリがない場合はルートから読み込む
         filepath = Path("data/community_lexicon.md")
+        if not filepath.exists():
+            filepath = Path("community_lexicon.md")
 
         if not filepath.exists():
             logger.info("community_lexicon.md not found, using empty lexicon")
@@ -110,7 +172,7 @@ class MemberProfileManager:
         try:
             content = filepath.read_text(encoding="utf-8")
             self.lexicon = self._parse_lexicon(content)
-            logger.info(f"Loaded {len(self.lexicon)} terms")
+            logger.info(f"Loaded {len(self.lexicon)} terms from {filepath}")
         except Exception as e:
             logger.error(f"Failed to load lexicon: {e}")
 
@@ -144,7 +206,10 @@ class MemberProfileManager:
 
     async def _load_consensus(self) -> None:
         """consensus_tracker.md を読み込む。"""
+        # v4.5: data/サブディレクトリがない場合はルートから読み込む
         filepath = Path("data/consensus_tracker.md")
+        if not filepath.exists():
+            filepath = Path("consensus_tracker.md")
 
         if not filepath.exists():
             logger.info("consensus_tracker.md not found, using empty consensus")
@@ -153,7 +218,7 @@ class MemberProfileManager:
         try:
             content = filepath.read_text(encoding="utf-8")
             self.consensus = self._parse_consensus(content)
-            logger.info(f"Loaded {len(self.consensus)} consensus topics")
+            logger.info(f"Loaded {len(self.consensus)} consensus topics from {filepath}")
         except Exception as e:
             logger.error(f"Failed to load consensus: {e}")
 
@@ -291,32 +356,56 @@ class MemberProfileManager:
         # メンバープロファイル（§6.6 メンバー質問応答に必須）
         if self.profiles:
             lines.append("【メンバープロファイル】")
-            lines.append("※メンバーについて聞かれたら、以下の情報を「フィールドノートの観察所見」として紹介すること")
+            lines.append("※メンバーについて聞かれたら、以下の情報を「フィールドノートの観察所見」または「栞の個人的印象」として紹介すること")
             lines.append("")
             
-            # Tier順にソート（A→B→C→D）
-            tier_order = {"A": 0, "B": 1, "C": 2, "D": 3}
-            sorted_profiles = sorted(
-                self.profiles.items(),
-                key=lambda x: tier_order.get(x[1].get("tier", "D"), 3)
-            )
+            # 重複を除去（display_nameとusernameの両方でエントリがある場合）
+            seen_profiles = set()
+            unique_profiles = []
+            for name, profile in self.profiles.items():
+                profile_id = id(profile)  # 同じdictオブジェクトを参照しているか
+                if profile_id not in seen_profiles:
+                    seen_profiles.add(profile_id)
+                    unique_profiles.append((name, profile))
             
-            for username, profile in sorted_profiles:
-                display_name = profile.get("display_name", username)
-                tier = profile.get("tier", "")
-                expertise = profile.get("expertise", "")
-                prediction_topics = profile.get("prediction_topics", "")
-                notes = profile.get("notes", "")
+            for name, profile in unique_profiles:
+                display_name = profile.get("display_name", name)
                 
+                # 基本情報
                 member_line = f"- {display_name}さん"
-                if tier:
-                    member_line += f" (Tier {tier})"
-                if expertise:
-                    member_line += f": {expertise}"
-                if prediction_topics and not compact:
-                    member_line += f" / 予測: {prediction_topics}"
-                if notes and not compact:
-                    member_line += f" / {notes}"
+                
+                # ポジション（役割）
+                position = profile.get("position", "")
+                if position:
+                    member_line += f": {position}"
+                
+                # 関心領域 / 専門
+                expertise = profile.get("expertise", "")
+                if expertise and not compact:
+                    member_line += f" / 関心: {expertise}"
+                
+                # 発言スタイル
+                style = profile.get("style", "")
+                if style and not compact:
+                    # 長すぎる場合は切り詰め
+                    if len(style) > 50:
+                        style = style[:47] + "..."
+                    member_line += f" / スタイル: {style}"
+                
+                # 代表的主張（compactでない場合のみ）
+                claims = profile.get("claims", "")
+                if claims and not compact:
+                    # 長すぎる場合は切り詰め
+                    if len(claims) > 80:
+                        claims = claims[:77] + "..."
+                    member_line += f" / 主張: {claims}"
+                
+                # 思想的特徴（印象応答用）
+                ideology = profile.get("ideology", "")
+                if ideology and not compact:
+                    if len(ideology) > 60:
+                        ideology = ideology[:57] + "..."
+                    member_line += f" / 特徴: {ideology}"
                 
                 lines.append(member_line)
             

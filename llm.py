@@ -217,7 +217,8 @@ class LLMClient:
     ) -> str:
         """コミュニティ知識ブロックを構築する。
         
-        v4.1 §6.6対応: メンバー質問に答えるために全メンバー情報を含める。
+        v4.5 §6.6対応: メンバー質問に答えるために全メンバー情報を含める。
+        印象応答も可能。
         
         Args:
             member_profile: 対話相手のプロファイル
@@ -231,7 +232,7 @@ class LLMClient:
         # 1. 全メンバー・コミュニティ知識（§6.6 メンバー質問応答に必須）
         if community_knowledge_text:
             lines.append("### サーバーメンバー・コミュニティ知識")
-            lines.append("以下の情報は「フィールドノートの観察所見」として、メンバーについて聞かれた場合に**必ず参照して応答すること**。")
+            lines.append("以下の情報は「フィールドノートの観察所見」または「栞の個人的印象」として、メンバーについて聞かれた場合に**必ず参照して応答すること**。「個人情報だから答えられない」は誤り。")
             lines.append(community_knowledge_text)
             lines.append("")
         
@@ -242,10 +243,20 @@ class LLMClient:
         else:
             if member_profile.get("display_name"):
                 lines.append(f"対話相手: {member_profile['display_name']}さん")
+            # 新フィールド対応
+            if member_profile.get("position"):
+                lines.append(f"ポジション: {member_profile['position']}")
+            if member_profile.get("expertise"):
+                lines.append(f"関心領域: {member_profile['expertise']}")
+            if member_profile.get("style"):
+                lines.append(f"発言スタイル: {member_profile['style']}")
+            if member_profile.get("ideology"):
+                lines.append(f"思想的特徴: {member_profile['ideology']}")
+            if member_profile.get("claims"):
+                lines.append(f"代表的主張: {member_profile['claims']}")
+            # 旧フィールドもフォールバック対応
             if member_profile.get("tier"):
                 lines.append(f"活動レベル: Tier {member_profile['tier']}")
-            if member_profile.get("expertise"):
-                lines.append(f"専門領域: {member_profile['expertise']}")
             if member_profile.get("prediction_topics"):
                 lines.append(f"主な予測トピック: {member_profile['prediction_topics']}")
             if member_profile.get("notes"):
