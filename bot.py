@@ -392,6 +392,12 @@ class ShioriBot(discord.Client):
             temperature=0.7,
         )
 
+        # STEP 11.5: 名前プレフィックスの除去
+        # LLMが「Shiori: 」「栞: 」などを付けてしまう場合がある
+        response_text = re.sub(r'^(Shiori:\s*)+', '', response_text, flags=re.IGNORECASE)
+        response_text = re.sub(r'^(栞:\s*)+', '', response_text)
+        response_text = response_text.strip()
+
         # STEP 12: 応答送信
         await message.channel.send(response_text)
 
