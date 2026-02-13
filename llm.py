@@ -141,6 +141,7 @@ class LLMClient:
         member_profile: dict | None,
         channel_overrides: dict | None,
         community_knowledge: str | None = None,
+        member_query_info: str | None = None,
     ) -> str:
         """system_prompt.txt + 動的コンテキストを結合してシステムプロンプトを構築する。
 
@@ -151,6 +152,7 @@ class LLMClient:
             member_profile: member_profile.py の get_profile() 戻り値
             channel_overrides: channel_config.py の get_overrides() 戻り値
             community_knowledge: コミュニティ知識テキスト
+            member_query_info: メンバー質問時の該当メンバー情報
 
         Returns:
             str: 完成したシステムプロンプト
@@ -169,9 +171,9 @@ class LLMClient:
         channel_block = self._build_channel_overrides_block(channel_overrides)
         prompt = prompt.replace("{channel_overrides_block}", channel_block)
 
-        # コミュニティ知識ブロック（対話相手プロファイル + 全体知識）
+        # コミュニティ知識ブロック（対話相手プロファイル + 全体知識 + メンバー質問情報）
         community_block = self._build_community_knowledge_block(
-            member_profile, community_knowledge
+            member_profile, community_knowledge, member_query_info
         )
         prompt = prompt.replace("{community_knowledge_block}", community_block)
 
@@ -214,12 +216,14 @@ class LLMClient:
         self,
         member_profile: dict | None,
         community_knowledge: str | None = None,
+        member_query_info: str | None = None,
     ) -> str:
         """コミュニティ知識ブロックを構築する。
 
         Args:
             member_profile: 対話相手の個別プロファイル
             community_knowledge: サーバー全体のコミュニティ知識
+            member_query_info: メンバー質問時の該当メンバー情報
 
         Returns:
             str: コミュニティ知識ブロック
@@ -228,6 +232,16 @@ class LLMClient:
 
         # デバッグログ
         logger.info(f"_build_community_knowledge_block called with community_knowledge length: {len(community_knowledge) if community_knowledge else 0}")
+
+        # 0. メンバー質問への回答情報（最優先で表示）
+        if member_query_info:
+            lines.append("=" * 50)
+            lines.append("【重要】以下はユーザーが質問しているメンバーの情報です。")
+            lines.append("この情報を使って回答してください。")
+            lines.append("=" * 50)
+            lines.append(member_query_info)
+            lines.append("=" * 50)
+            lines.append("")
 
         # 1. 全体コミュニティ知識（Tier A-B + コンセンサス）
         if community_knowledge and community_knowledge != "（コミュニティ知識なし）":

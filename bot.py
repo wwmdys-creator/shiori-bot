@@ -346,11 +346,18 @@ class ShioriBot(discord.Client):
 
         # STEP 9: システムプロンプト構築
         trust_level = self.trust.get_trust_level(user_id)
+        
+        # メンバーに関する質問かどうか判定し、該当メンバー情報を抽出
+        member_query_info = self._extract_member_query_info(message.content)
+        if member_query_info:
+            logger.info(f"Member query detected: {member_query_info}")
+        
         system_prompt = self.llm.build_system_prompt(
             trust_level=trust_level,
             member_profile=profile,
             channel_overrides=overrides,
             community_knowledge=community_knowledge,
+            member_query_info=member_query_info,  # 追加
         )
         
         # デバッグ: システムプロンプトに橋が含まれているか確認
@@ -560,6 +567,58 @@ class ShioriBot(discord.Client):
             if cat:
                 keywords.add(cat)
         return list(keywords)[:10]
+
+    def _extract_member_query_info(self, content: str) -> str | None:
+        """メンバーに関する質問から該当メンバー情報を抽出する。
+        
+        Args:
+            content: ユーザーのメッセージ
+            
+        Returns:
+            str | None: 該当メンバーの情報テキスト、または None
+        """
+        import re
+        
+        # @Shiori等のメンションを除去
+        content_clean = re.sub(r"@\S+\s*", "", content).strip()
+        
+        # メンバー質問パターン
+        patterns = [
+            r"(.+?)さん(?:って|は|の|について)",  # 〇〇さんって/は/の/について
+            r"(.+?)(?:って|は)(?:どんな人|誰|だれ)",  # 〇〇ってどんな人
+            r"(.+?)(?:の情報|について教えて|知ってる)",  # 〇〇の情報
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content_clean)
+            if match:
+                query_name = match.group(1).strip()
+                
+                # メンバー検索
+                results = self.member_profile.search_member(query_name)
+                if results:
+                    # 最初のマッチを返す
+                    member = results[0]
+                    info_lines = [f"【質問されているメンバー: {member.get('display_name', query_name)}】"]
+                    
+                    if member.get("tier"):
+                        info_lines.append(f"Tier: {member['tier']}")
+                    if member.get("ポジション"):
+                        info_lines.append(f"役割: {member['ポジション']}")
+                    if member.get("関心領域"):
+                        info_lines.append(f"関心領域: {member['関心領域']}")
+                    if member.get("思想的特徴"):
+                        info_lines.append(f"思想的特徴: {member['思想的特徴']}")
+                    if member.get("発言スタイル"):
+                        info_lines.append(f"発言スタイル: {member['発言スタイル']}")
+                    
+                    info = "\n".join(info_lines)
+                    logger.info(f"Found member info for '{query_name}': {info[:100]}...")
+                    return info
+                else:
+                    logger.info(f"No member found for query: '{query_name}'")
+        
+        return None
 
     # ─── バックグラウンドタスク ────────────────────────────
 
