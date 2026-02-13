@@ -100,16 +100,12 @@ class MemberProfileManager:
 
         for match in matches:
             display_name = match[0].strip()
-            username = match[1].strip() if match[1] else None
+            username = match[1].strip() if match[1] else display_name  # usernameがなければdisplay_nameを使用
             block = match[2]
 
             # スキップすべきセクション
             skip_names = ["動的メモ", "ファイル仕様", "使用ガイド", "合意度スケール"]
             if any(skip in display_name for skip in skip_names):
-                continue
-            
-            # usernameがない場合はスキップ（メタデータセクションの可能性）
-            if not username:
                 continue
 
             profile = {"display_name": display_name}
@@ -129,7 +125,7 @@ class MemberProfileManager:
                 profile[key] = val
 
             # 最低限のフィールドがあるプロファイルのみ追加
-            if len(profile) > 1 and username:
+            if len(profile) > 1:  # display_name以外に何かある
                 profiles[username] = profile
 
         return profiles
