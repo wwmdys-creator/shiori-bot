@@ -587,11 +587,13 @@ class ShioriBot(discord.Client):
         
         logger.info(f"Content after cleaning: '{content_clean}'")
         
-        # メンバー質問パターン
+        # メンバー質問パターン（より多くのパターンに対応）
         patterns = [
             r"(.+?)さん(?:って|は|の|について)",  # 〇〇さんって/は/の/について
+            r"(.+?)さん(?:わかる|わかり|知ってる|知って)",  # 〇〇さんわかる？/知ってる？
             r"(.+?)(?:って|は)(?:どんな人|誰|だれ)",  # 〇〇ってどんな人
             r"(.+?)(?:の情報|について教えて|知ってる)",  # 〇〇の情報
+            r"(.+?)さん",  # 最後の手段：〇〇さん（任意の文脈）
         ]
         
         for i, pattern in enumerate(patterns):
@@ -619,6 +621,8 @@ class ShioriBot(discord.Client):
                         info_lines.append(f"思想的特徴: {member['思想的特徴']}")
                     if member.get("発言スタイル"):
                         info_lines.append(f"発言スタイル: {member['発言スタイル']}")
+                    if member.get("備考"):
+                        info_lines.append(f"備考: {member['備考']}")
                     
                     info = "\n".join(info_lines)
                     logger.info(f"Returning member info: {info[:150]}...")
