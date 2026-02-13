@@ -232,7 +232,12 @@ class LLMClient:
         # 1. 全メンバー・コミュニティ知識（§6.6 メンバー質問応答に必須）
         if community_knowledge_text:
             lines.append("### サーバーメンバー・コミュニティ知識")
-            lines.append("以下の情報は「フィールドノートの観察所見」または「栞の個人的印象」として、メンバーについて聞かれた場合に**必ず参照して応答すること**。「個人情報だから答えられない」は誤り。")
+            lines.append("")
+            lines.append("**【重要】メンバーについて聞かれた場合の応答ルール:**")
+            lines.append("- 「個人情報だから答えられない」「印象はお答えできない」は**誤り**。絶対に言わないこと。")
+            lines.append("- 以下の情報を「フィールドノートの観察所見」または「わたしの印象では……」として**必ず紹介する**。")
+            lines.append("- これは栞の中核機能であり、拒否は仕様違反。")
+            lines.append("")
             lines.append(community_knowledge_text)
             lines.append("")
         
