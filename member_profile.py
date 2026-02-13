@@ -6,6 +6,11 @@ COMMON_MISTAKES §10: 旧名 profiles.py → 現名 member_profile.py
 `from profiles import` とするとImportError。
 
 参照: interface_contract.md §2.12
+
+v4.1.1 修正:
+- ファイルパス検索を柔軟化（data/ 優先、なければルート直下）
+- members_seed.md / members_extended.md 両フォーマットに対応
+- 検索ロジック拡張（user_id, username, display_name, 旧名で横断検索）
 """
 
 import logging
@@ -18,14 +23,17 @@ logger = logging.getLogger("shiori.member_profile")
 class MemberProfileManager:
     """メンバープロファイル管理クラス。
 
-    3つのデータファイルを統合管理:
-    - data/members_extended.md: メンバープロファイル
+    データファイルを統合管理:
+    - data/members.md (または members_seed.md): メンバー台帳
+    - data/members_extended.md: 詳細プロファイル（補助）
     - data/community_lexicon.md: コミュニティ用語辞典
     - data/consensus_tracker.md: コンセンサストラッカー
 
     Attributes:
         profiles: username → プロファイル辞書
         user_id_map: user_id → username のマッピング
+        display_name_map: display_name → username のマッピング
+        alias_map: 旧名・別名 → username のマッピング
         lexicon: 用語名 → 定義辞書
         consensus: トピック → コンセンサス情報辞書
     """
@@ -33,139 +41,245 @@ class MemberProfileManager:
     def __init__(self):
         self.profiles: dict[str, dict] = {}
         self.user_id_map: dict[int, str] = {}
+        self.display_name_map: dict[str, str] = {}
+        self.alias_map: dict[str, str] = {}
         self.lexicon: dict[str, dict] = {}
         self.consensus: dict[str, dict] = {}
 
+    def _find_file(self, *candidates: str) -> Path | None:
+        """候補リストから最初に見つかったファイルを返す。"""
+        for candidate in candidates:
+            path = Path(candidate)
+            if path.exists():
+                logger.debug(f"Found file: {path}")
+                return path
+        return None
+
     async def load(self) -> None:
-        """起動時に3ファイルをフルロード。"""
+        """起動時にファイルをフルロード。"""
         await self._load_profiles()
         await self._load_lexicon()
         await self._load_consensus()
 
     async def _load_profiles(self) -> None:
-        """members_extended.md を読み込む。"""
-        # v4.5: data/サブディレクトリがない場合はルートから読み込む
-        filepath = Path("data/members_extended.md")
-        if not filepath.exists():
-            filepath = Path("members_extended.md")
-
-        if not filepath.exists():
-            logger.info("members_extended.md not found, using empty profiles")
-            return
-
-        try:
-            content = filepath.read_text(encoding="utf-8")
-            self.profiles = self._parse_profiles(content)
-            self._build_user_id_map()
-            logger.info(f"Loaded {len(self.profiles)} profiles from {filepath}")
-        except Exception as e:
-            logger.error(f"Failed to load profiles: {e}")
-
-    def _parse_profiles(self, content: str) -> dict[str, dict]:
-        """members_extended.md をパースする。
+        """メンバープロファイルを読み込む。
         
-        v4.5対応: 実際のmembers_extended.mdフォーマットに対応
+        優先順位:
+        1. data/members.md（運用ファイル）
+        2. data/members_seed.md
+        3. members_seed.md（ルート直下）
+        """
+        # メイン台帳
+        main_file = self._find_file(
+            "data/members.md",
+            "data/members_seed.md",
+            "members_seed.md",
+        )
+        
+        if main_file:
+            try:
+                content = main_file.read_text(encoding="utf-8")
+                self.profiles = self._parse_members_seed(content)
+                logger.info(f"Loaded {len(self.profiles)} profiles from {main_file}")
+            except Exception as e:
+                logger.error(f"Failed to load {main_file}: {e}")
+        
+        # 詳細プロファイル（補助、マージ）
+        extended_file = self._find_file(
+            "data/members_extended.md",
+            "members_extended.md",
+        )
+        
+        if extended_file:
+            try:
+                content = extended_file.read_text(encoding="utf-8")
+                extended = self._parse_members_extended(content)
+                self._merge_extended_profiles(extended)
+                logger.info(f"Merged {len(extended)} extended profiles from {extended_file}")
+            except Exception as e:
+                logger.error(f"Failed to load {extended_file}: {e}")
+        
+        # マッピング構築
+        self._build_lookup_maps()
+        
+        if not self.profiles:
+            logger.warning("No profiles loaded - check file paths")
+
+    def _parse_members_seed(self, content: str) -> dict[str, dict]:
+        """members_seed.md / members.md をパースする。
+        
+        フォーマット:
+        ## メンバー: ○
+        
+        - **user_id:** 559358257123295242
+        - **username:** hashimae
+        - **display_name:** ○
+        - **tier:** A
+        - **expertise:** 仏教哲学, シミュレーション仮説
+        ...
         """
         profiles = {}
-
-        # フォーマット例（v4.5 members_extended.md）:
-        # ### Rom🧄（katsucurry_apple）
-        # 
-        # - **user_id**: katsucurry_apple
-        # - **表示名**: Rom🧄
-        # - **投稿数**: 907件（未来予測ch）
-        # - **ポジション**: サーバー最多投稿者...
-        # - **思想的特徴**: 楽観的だが...
-        # - **関心領域**: トランスヒューマニズム、...
-        # - **発言スタイル**: 語尾に「〜っピ」...
-        # - **代表的主張**: ...
-        # - **栞の役割保護**: ...
-
-        # ### で始まるセクションを抽出（Tier見出しは除外）
-        # 「### 動的メモ」や「## Tier-」は除外
-        pattern = r"### ([^（\n]+)(?:（([^）]+)）)?\n\n((?:- .+\n?)+)"
+        
+        # ## メンバー: {name} のパターン
+        pattern = r"## メンバー: ([^\n]+)\n((?:[-\*].*\n?)*)"
         matches = re.findall(pattern, content)
-
-        for display_name, username, block in matches:
-            display_name = display_name.strip()
-            username = username.strip() if username else display_name
+        
+        for header_name, block in matches:
+            header_name = header_name.strip()
+            profile = {"_header_name": header_name}
             
-            # 「動的メモ」セクションはスキップ
-            if display_name == "動的メモ":
-                continue
+            for line in block.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # - **field:** value または - field: value
+                match = re.match(r"^[-\*]\s*\*?\*?(\w+)\*?\*?:?\*?\*?\s*(.+)$", line)
+                if match:
+                    key = match.group(1).strip()
+                    val = match.group(2).strip()
+                    
+                    # user_id は整数に変換（pending以外）
+                    if key == "user_id":
+                        if val.isdigit():
+                            profile[key] = int(val)
+                        else:
+                            profile[key] = val  # "pending" などはそのまま
+                    else:
+                        profile[key] = val
+            
+            # username をキーにする（なければ header_name）
+            username = profile.get("username", header_name)
+            profiles[username] = profile
+        
+        return profiles
+
+    def _parse_members_extended(self, content: str) -> dict[str, dict]:
+        """members_extended.md をパースする。
+        
+        フォーマット:
+        ### ○（hashimae）
+        
+        - **user_id**: 559358257123295242
+        - **表示名**: ○
+        - **投稿数**: 251件
+        ...
+        """
+        profiles = {}
+        
+        # ### 表示名（username） のパターン
+        pattern = r"###\s+([^（\n]+)(?:（([^）]+)）)?\s*\n((?:[-\*].*\n?)*)"
+        matches = re.findall(pattern, content)
+        
+        for display_name, username_hint, block in matches:
+            display_name = display_name.strip()
+            username = username_hint.strip() if username_hint else display_name
             
             profile = {
                 "display_name": display_name,
-                "username": username,
+                "_username_hint": username,
             }
-
+            
+            # フィールド名の日本語→英語マッピング
+            field_map = {
+                "表示名": "display_name",
+                "投稿数": "post_count",
+                "ポジション": "position",
+                "思想的特徴": "ideology",
+                "関心領域": "expertise",
+                "発言スタイル": "style",
+                "代表的主張": "representative_claims",
+                "チャンネル横断": "channels",
+                "備考": "notes",
+            }
+            
             for line in block.strip().split("\n"):
-                if line.startswith("- "):
-                    # "- **key**: value" 形式をパース
-                    line_content = line[2:]  # "- " を除去
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                
+                # - **field**: value
+                match = re.match(r"^[-\*]\s*\*?\*?([^*:]+)\*?\*?:\s*(.+)$", line)
+                if match:
+                    key_raw = match.group(1).strip()
+                    val = match.group(2).strip()
                     
-                    # **key**: value 形式
-                    bold_match = re.match(r"\*\*([^*]+)\*\*:\s*(.+)", line_content)
-                    if bold_match:
-                        key = bold_match.group(1).strip()
-                        val = bold_match.group(2).strip()
-                    else:
-                        # key: value 形式（フォールバック）
-                        key_val = line_content.split(": ", 1)
-                        if len(key_val) == 2:
-                            key, val = key_val
-                            key = key.strip()
-                            val = val.strip()
+                    # 日本語キーを英語に変換
+                    key = field_map.get(key_raw, key_raw)
+                    
+                    if key == "user_id":
+                        if val.isdigit():
+                            profile[key] = int(val)
                         else:
-                            continue
-                    
-                    # キー名を正規化
-                    key_mapping = {
-                        "user_id": "user_id",
-                        "表示名": "display_name",
-                        "投稿数": "post_count",
-                        "ポジション": "position",
-                        "思想的特徴": "ideology",
-                        "関心領域": "expertise",  # expertiseにマッピング
-                        "発言スタイル": "style",
-                        "代表的主張": "claims",
-                        "栞の役割保護": "protection",
-                        "チャンネル横断": "channels",
-                        "通称": "nickname",
-                        "愛称": "nickname",
-                        # v4.1以前のキーもサポート
-                        "tier": "tier",
-                        "expertise": "expertise",
-                        "prediction_topics": "prediction_topics",
-                        "notes": "notes",
-                    }
-                    
-                    normalized_key = key_mapping.get(key, key.lower().replace(" ", "_"))
-                    profile[normalized_key] = val
-
-            # display_nameをキーにして保存（usernameでも検索可能にする）
-            profiles[display_name] = profile
-            if username and username != display_name:
-                profiles[username] = profile
-
+                            profile[key] = val
+                    else:
+                        profile[key] = val
+            
+            profiles[username] = profile
+        
         return profiles
 
-    def _build_user_id_map(self) -> None:
-        """user_id → username のマッピングを構築。"""
+    def _merge_extended_profiles(self, extended: dict[str, dict]) -> None:
+        """extended プロファイルをメインにマージする。"""
+        for username, ext_profile in extended.items():
+            if username in self.profiles:
+                # 既存プロファイルに追加情報をマージ
+                for key, val in ext_profile.items():
+                    if key not in self.profiles[username] or not self.profiles[username][key]:
+                        self.profiles[username][key] = val
+            else:
+                # 新規追加
+                self.profiles[username] = ext_profile
+
+    def _build_lookup_maps(self) -> None:
+        """各種逆引きマップを構築する。"""
         self.user_id_map = {}
+        self.display_name_map = {}
+        self.alias_map = {}
+        
         for username, profile in self.profiles.items():
+            # user_id マップ
             user_id = profile.get("user_id")
-            if user_id:
+            if isinstance(user_id, int):
                 self.user_id_map[user_id] = username
+            
+            # display_name マップ
+            display_name = profile.get("display_name")
+            if display_name:
+                self.display_name_map[display_name] = username
+                # 正規化版も追加（小文字、空白除去）
+                normalized = display_name.lower().replace(" ", "")
+                self.display_name_map[normalized] = username
+            
+            # header_name も追加
+            header_name = profile.get("_header_name")
+            if header_name and header_name != display_name:
+                self.display_name_map[header_name] = username
+            
+            # 備考欄から旧名を抽出
+            notes = profile.get("notes", "")
+            if "以前の表示名" in notes or "旧名" in notes:
+                # 「橋」は以前の表示名 → "橋" を抽出
+                alias_match = re.search(r"[「『]([^」』]+)[」』].*(?:以前|旧)", notes)
+                if alias_match:
+                    alias = alias_match.group(1)
+                    self.alias_map[alias] = username
+            
+            # username自体もdisplay_name_mapに追加
+            self.display_name_map[username] = username
+        
+        logger.debug(f"Built maps: {len(self.user_id_map)} user_ids, "
+                    f"{len(self.display_name_map)} display_names, "
+                    f"{len(self.alias_map)} aliases")
 
     async def _load_lexicon(self) -> None:
         """community_lexicon.md を読み込む。"""
-        # v4.5: data/サブディレクトリがない場合はルートから読み込む
-        filepath = Path("data/community_lexicon.md")
-        if not filepath.exists():
-            filepath = Path("community_lexicon.md")
+        filepath = self._find_file(
+            "data/community_lexicon.md",
+            "community_lexicon.md",
+        )
 
-        if not filepath.exists():
+        if not filepath:
             logger.info("community_lexicon.md not found, using empty lexicon")
             return
 
@@ -179,12 +293,6 @@ class MemberProfileManager:
     def _parse_lexicon(self, content: str) -> dict[str, dict]:
         """community_lexicon.md をパースする。"""
         lexicon = {}
-
-        # フォーマット例:
-        # ## シンギュラリティ
-        # - definition: 技術的特異点。AIが人間の知能を超える瞬間
-        # - proposer: 不明（カーツワイル由来）
-        # - related: AGI, ASI
 
         pattern = r"## ([^\n]+)\n((?:- .+\n?)+)"
         matches = re.findall(pattern, content)
@@ -206,12 +314,12 @@ class MemberProfileManager:
 
     async def _load_consensus(self) -> None:
         """consensus_tracker.md を読み込む。"""
-        # v4.5: data/サブディレクトリがない場合はルートから読み込む
-        filepath = Path("data/consensus_tracker.md")
-        if not filepath.exists():
-            filepath = Path("consensus_tracker.md")
+        filepath = self._find_file(
+            "data/consensus_tracker.md",
+            "consensus_tracker.md",
+        )
 
-        if not filepath.exists():
+        if not filepath:
             logger.info("consensus_tracker.md not found, using empty consensus")
             return
 
@@ -226,12 +334,6 @@ class MemberProfileManager:
         """consensus_tracker.md をパースする。"""
         consensus = {}
 
-        # フォーマット例:
-        # ## AGI到達時期
-        # - majority: 2030-2035年
-        # - dissenters: ろーる（懐疑派、2040年以降）
-        # - updated: 2025-01
-
         pattern = r"## ([^\n]+)\n((?:- .+\n?)+)"
         matches = re.findall(pattern, content)
 
@@ -245,7 +347,6 @@ class MemberProfileManager:
                     if len(key_val) == 2:
                         key, val = key_val
                         if key == "dissenters":
-                            # リスト化
                             entry[key] = [d.strip() for d in val.split(",")]
                         else:
                             entry[key] = val.strip()
@@ -258,23 +359,53 @@ class MemberProfileManager:
         self,
         user_id: int = None,
         username: str = None,
+        display_name: str = None,
     ) -> dict | None:
         """メンバープロファイルを返す。
 
-        user_idまたはusernameで検索。同期メソッド。
+        user_id、username、display_name のいずれかで検索。
+        旧名・別名でも検索可能。同期メソッド。
 
         Args:
             user_id: Discord user ID
             username: Discord username
+            display_name: 表示名（旧名含む）
 
         Returns:
             dict | None: プロファイル情報。該当なしならNone。
         """
+        # 1. user_id で検索
         if user_id and user_id in self.user_id_map:
             username = self.user_id_map[user_id]
-
+            return self.profiles.get(username)
+        
+        # 2. username で直接検索
         if username and username in self.profiles:
             return self.profiles[username]
+        
+        # 3. display_name で検索
+        search_name = display_name or username
+        if search_name:
+            # 完全一致
+            if search_name in self.display_name_map:
+                uname = self.display_name_map[search_name]
+                return self.profiles.get(uname)
+            
+            # 正規化版で検索
+            normalized = search_name.lower().replace(" ", "")
+            if normalized in self.display_name_map:
+                uname = self.display_name_map[normalized]
+                return self.profiles.get(uname)
+            
+            # 別名・旧名で検索
+            if search_name in self.alias_map:
+                uname = self.alias_map[search_name]
+                return self.profiles.get(uname)
+            
+            # 部分一致（最終手段）
+            for dn, uname in self.display_name_map.items():
+                if search_name in dn or dn in search_name:
+                    return self.profiles.get(uname)
 
         return None
 
@@ -353,86 +484,19 @@ class MemberProfileManager:
         """
         lines = []
 
-        # メンバープロファイル（§6.6 メンバー質問応答に必須）
-        if self.profiles:
-            lines.append("【メンバープロファイル】")
-            lines.append("※メンバーについて聞かれたら、以下の情報を「フィールドノートの観察所見」または「栞の個人的印象」として紹介すること")
-            lines.append("")
-            
-            # 重複を除去（display_nameとusernameの両方でエントリがある場合）
-            seen_profiles = set()
-            unique_profiles = []
-            for name, profile in self.profiles.items():
-                profile_id = id(profile)  # 同じdictオブジェクトを参照しているか
-                if profile_id not in seen_profiles:
-                    seen_profiles.add(profile_id)
-                    unique_profiles.append((name, profile))
-            
-            for name, profile in unique_profiles:
-                display_name = profile.get("display_name", name)
-                
-                # 基本情報
-                member_line = f"- {display_name}さん"
-                
-                # ポジション（役割）
-                position = profile.get("position", "")
-                if position:
-                    member_line += f": {position}"
-                
-                # 関心領域 / 専門
-                expertise = profile.get("expertise", "")
-                if expertise and not compact:
-                    member_line += f" / 関心: {expertise}"
-                
-                # 発言スタイル
-                style = profile.get("style", "")
-                if style and not compact:
-                    # 長すぎる場合は切り詰め
-                    if len(style) > 50:
-                        style = style[:47] + "..."
-                    member_line += f" / スタイル: {style}"
-                
-                # 代表的主張（compactでない場合のみ）
-                claims = profile.get("claims", "")
-                if claims and not compact:
-                    # 長すぎる場合は切り詰め
-                    if len(claims) > 80:
-                        claims = claims[:77] + "..."
-                    member_line += f" / 主張: {claims}"
-                
-                # 思想的特徴（印象応答用）
-                ideology = profile.get("ideology", "")
-                if ideology and not compact:
-                    if len(ideology) > 60:
-                        ideology = ideology[:57] + "..."
-                    member_line += f" / 特徴: {ideology}"
-                
-                lines.append(member_line)
-            
+        # Tier A-Bメンバー
+        tier_ab = self.get_tier_ab_summaries()
+        if tier_ab and tier_ab != "（Tier A-Bメンバーなし）":
+            lines.append("【主要メンバー】")
+            lines.append(tier_ab)
             lines.append("")
 
-        # 用語辞典
-        if self.lexicon and not compact:
-            lines.append("【サーバー固有用語】")
-            for term, info in list(self.lexicon.items())[:10]:
-                definition = info.get("definition", "")
-                proposer = info.get("proposer", "")
-                term_line = f"- {term}: {definition}"
-                if proposer:
-                    term_line += f"（提唱: {proposer}）"
-                lines.append(term_line)
-            lines.append("")
-
-        # コンセンサス情報
-        if self.consensus:
+        # コンセンサス情報（compact時は省略）
+        if not compact and self.consensus:
             lines.append("【サーバーのコンセンサス】")
-            for topic, info in list(self.consensus.items())[:5]:
+            for topic, info in list(self.consensus.items())[:3]:
                 majority = info.get("majority", "不明")
-                dissenters = info.get("dissenters", [])
-                consensus_line = f"- {topic}: 主流派={majority}"
-                if dissenters:
-                    consensus_line += f" / 異論={', '.join(dissenters)}"
-                lines.append(consensus_line)
+                lines.append(f"- {topic}: {majority}")
             lines.append("")
 
         return "\n".join(lines) if lines else "（コミュニティ知識なし）"
@@ -483,64 +547,6 @@ class MemberProfileManager:
 
         return None
 
-    def find_member_by_name(self, name: str) -> dict | None:
-        """名前（部分一致）でメンバープロファイルを検索する。
-        
-        Args:
-            name: 検索する名前（部分一致）
-            
-        Returns:
-            dict | None: プロファイル辞書。見つからない場合はNone。
-        """
-        name_lower = name.lower()
-        
-        # 完全一致を優先
-        for key, profile in self.profiles.items():
-            if key.lower() == name_lower:
-                return profile
-            display_name = profile.get("display_name", "").lower()
-            if display_name == name_lower:
-                return profile
-        
-        # 部分一致
-        for key, profile in self.profiles.items():
-            if name_lower in key.lower():
-                return profile
-            display_name = profile.get("display_name", "").lower()
-            if name_lower in display_name:
-                return profile
-        
-        return None
-
-    def get_member_summary_for_highlight(self, name: str) -> str | None:
-        """メンバー名からハイライト用の要約を生成する。
-        
-        Args:
-            name: 検索する名前
-            
-        Returns:
-            str | None: ハイライト用要約テキスト。見つからない場合はNone。
-        """
-        profile = self.find_member_by_name(name)
-        if not profile:
-            return None
-        
-        display_name = profile.get("display_name", name)
-        parts = [f"【{display_name}さんのプロファイル】"]
-        
-        if profile.get("position"):
-            parts.append(f"ポジション: {profile['position']}")
-        if profile.get("expertise"):
-            parts.append(f"関心領域: {profile['expertise']}")
-        if profile.get("style"):
-            parts.append(f"発言スタイル: {profile['style']}")
-        if profile.get("ideology"):
-            parts.append(f"思想的特徴: {profile['ideology']}")
-        if profile.get("claims"):
-            parts.append(f"代表的主張: {profile['claims']}")
-        
-        return "\n".join(parts) if len(parts) > 1 else None
-
     def get_display_name(self, user_id: int) -> str:
         """user_idから表示名を返す。
 
@@ -589,3 +595,35 @@ class MemberProfileManager:
                 related.append(profile)
 
         return related
+    
+    def search_members(self, query: str) -> list[dict]:
+        """クエリに一致するメンバーを検索する。
+        
+        display_name、username、expertise、notesを横断検索。
+        
+        Args:
+            query: 検索クエリ
+            
+        Returns:
+            list[dict]: マッチしたプロファイルのリスト
+        """
+        results = []
+        query_lower = query.lower()
+        
+        for username, profile in self.profiles.items():
+            # 各フィールドで検索
+            searchable = [
+                profile.get("display_name", ""),
+                profile.get("username", username),
+                profile.get("_header_name", ""),
+                profile.get("expertise", ""),
+                profile.get("notes", ""),
+                profile.get("position", ""),
+            ]
+            
+            combined = " ".join(str(s) for s in searchable).lower()
+            
+            if query_lower in combined:
+                results.append(profile)
+        
+        return results
