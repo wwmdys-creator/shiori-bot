@@ -57,11 +57,26 @@ class MemberProfileManager:
     async def _load_profiles(self):
         """members_seed.md と members_extended.md を読み込む。"""
         # まず members_seed.md から基本情報を読み込む
+        # 注意: data/members.md はボリュームに空ファイルが残る可能性があるため除外
         seed_file = self._find_file(
             "data/members_seed.md",
-            "data/members.md",
             "members_seed.md",
         )
+        
+        # seed_file が見つからない、または空の場合は members.md を試す
+        if seed_file:
+            content = seed_file.read_text(encoding="utf-8")
+            if len(content.strip()) < 100:  # ほぼ空のファイル
+                logger.warning(f"{seed_file} is empty or too small, trying alternatives")
+                seed_file = None
+        
+        if not seed_file:
+            # フォールバック: members.md を試す
+            fallback = self._find_file("data/members.md")
+            if fallback:
+                content = fallback.read_text(encoding="utf-8")
+                if len(content.strip()) >= 100:
+                    seed_file = fallback
         
         if seed_file:
             try:
