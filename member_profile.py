@@ -288,19 +288,62 @@ class MemberProfileManager:
         """
         lines = []
 
-        # Tier A-Bメンバー
-        tier_ab = self.get_tier_ab_summaries()
-        if tier_ab and tier_ab != "（Tier A-Bメンバーなし）":
-            lines.append("【主要メンバー】")
-            lines.append(tier_ab)
+        # メンバープロファイル（§6.6 メンバー質問応答に必須）
+        if self.profiles:
+            lines.append("【メンバープロファイル】")
+            lines.append("※メンバーについて聞かれたら、以下の情報を「フィールドノートの観察所見」として紹介すること")
+            lines.append("")
+            
+            # Tier順にソート（A→B→C→D）
+            tier_order = {"A": 0, "B": 1, "C": 2, "D": 3}
+            sorted_profiles = sorted(
+                self.profiles.items(),
+                key=lambda x: tier_order.get(x[1].get("tier", "D"), 3)
+            )
+            
+            for username, profile in sorted_profiles:
+                display_name = profile.get("display_name", username)
+                tier = profile.get("tier", "")
+                expertise = profile.get("expertise", "")
+                prediction_topics = profile.get("prediction_topics", "")
+                notes = profile.get("notes", "")
+                
+                member_line = f"- {display_name}さん"
+                if tier:
+                    member_line += f" (Tier {tier})"
+                if expertise:
+                    member_line += f": {expertise}"
+                if prediction_topics and not compact:
+                    member_line += f" / 予測: {prediction_topics}"
+                if notes and not compact:
+                    member_line += f" / {notes}"
+                
+                lines.append(member_line)
+            
             lines.append("")
 
-        # コンセンサス情報（compact時は省略）
-        if not compact and self.consensus:
+        # 用語辞典
+        if self.lexicon and not compact:
+            lines.append("【サーバー固有用語】")
+            for term, info in list(self.lexicon.items())[:10]:
+                definition = info.get("definition", "")
+                proposer = info.get("proposer", "")
+                term_line = f"- {term}: {definition}"
+                if proposer:
+                    term_line += f"（提唱: {proposer}）"
+                lines.append(term_line)
+            lines.append("")
+
+        # コンセンサス情報
+        if self.consensus:
             lines.append("【サーバーのコンセンサス】")
-            for topic, info in list(self.consensus.items())[:3]:
+            for topic, info in list(self.consensus.items())[:5]:
                 majority = info.get("majority", "不明")
-                lines.append(f"- {topic}: {majority}")
+                dissenters = info.get("dissenters", [])
+                consensus_line = f"- {topic}: 主流派={majority}"
+                if dissenters:
+                    consensus_line += f" / 異論={', '.join(dissenters)}"
+                lines.append(consensus_line)
             lines.append("")
 
         return "\n".join(lines) if lines else "（コミュニティ知識なし）"

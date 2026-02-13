@@ -342,10 +342,17 @@ class ShioriBot(discord.Client):
 
         # STEP 9: システムプロンプト構築
         trust_level = self.trust.get_trust_level(user_id)
+        
+        # §6.6 コミュニティ知識応答のため、全メンバー情報を取得
+        community_knowledge_text = self.member_profile.get_community_knowledge_text(
+            compact=False  # 全情報を含める
+        )
+        
         system_prompt = self.llm.build_system_prompt(
             trust_level=trust_level,
             member_profile=profile,
             channel_overrides=overrides,
+            community_knowledge_text=community_knowledge_text,
         )
 
         # 動的コンテキスト注入
