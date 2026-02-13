@@ -150,7 +150,7 @@ class LLMClient:
             trust_level: 信頼度レベル（1-5）
             member_profile: member_profile.py の get_profile() 戻り値
             channel_overrides: channel_config.py の get_overrides() 戻り値
-            community_knowledge: member_profile.py の get_community_knowledge_text() 戻り値
+            community_knowledge: コミュニティ知識テキスト
 
         Returns:
             str: 完成したシステムプロンプト
@@ -219,7 +219,7 @@ class LLMClient:
 
         Args:
             member_profile: 対話相手の個別プロファイル
-            community_knowledge: Tier A-Bメンバー + コンセンサス情報
+            community_knowledge: サーバー全体のコミュニティ知識
 
         Returns:
             str: コミュニティ知識ブロック
@@ -241,6 +241,10 @@ class LLMClient:
                 lines.append(f"Tier: {member_profile['tier']}")
             if member_profile.get("expertise"):
                 lines.append(f"専門領域: {member_profile['expertise']}")
+            if member_profile.get("ポジション"):
+                lines.append(f"役割: {member_profile['ポジション']}")
+            if member_profile.get("関心領域"):
+                lines.append(f"関心領域: {member_profile['関心領域']}")
             if member_profile.get("prediction_topics"):
                 lines.append(f"主な予測トピック: {member_profile['prediction_topics']}")
             if member_profile.get("notes"):

@@ -276,9 +276,11 @@ class ShioriBot(discord.Client):
         community_knowledge = self.member_profile.get_community_knowledge_text(
             compact=True
         )
+        # デバッグログ
         logger.info(f"Community knowledge length: {len(community_knowledge) if community_knowledge else 0}")
-        logger.info(f"Community knowledge preview: {community_knowledge[:300] if community_knowledge else 'None'}...")
         if community_knowledge:
+            preview = community_knowledge[:500].replace('\n', ' ')
+            logger.info(f"Community knowledge preview: {preview}...")
             extra_context["community_knowledge"] = community_knowledge
 
         # ─── STEP 5: 予測検出（T1）
