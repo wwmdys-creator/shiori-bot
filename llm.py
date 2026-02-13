@@ -39,9 +39,19 @@ class LLMClient:
         """system_prompt.txt を読み込む。"""
         filepath = Path("system_prompt.txt")
         if not filepath.exists():
-            logger.warning("system_prompt.txt not found, using empty template")
+            # data/ ディレクトリも試す
+            filepath = Path("data/system_prompt.txt")
+        if not filepath.exists():
+            logger.warning("system_prompt.txt not found in root or data/, using empty template")
             return ""
-        return filepath.read_text(encoding="utf-8")
+        content = filepath.read_text(encoding="utf-8")
+        logger.info(f"[DEBUG] Loaded system_prompt.txt from {filepath}, length: {len(content)}")
+        # 重要なセクションの存在確認
+        if "§6.6" in content:
+            logger.info("[DEBUG] §6.6 section FOUND in system_prompt.txt")
+        else:
+            logger.warning("[DEBUG] §6.6 section NOT FOUND in system_prompt.txt")
+        return content
 
     async def generate_response(
         self,
@@ -233,12 +243,31 @@ class LLMClient:
         if community_knowledge_text:
             lines.append("### サーバーメンバー・コミュニティ知識")
             lines.append("")
-            lines.append("**【重要】メンバーについて聞かれた場合の応答ルール:**")
-            lines.append("- 「個人情報だから答えられない」「印象はお答えできない」は**誤り**。絶対に言わないこと。")
-            lines.append("- 以下の情報を「フィールドノートの観察所見」または「わたしの印象では……」として**必ず紹介する**。")
-            lines.append("- これは栞の中核機能であり、拒否は仕様違反。")
+            lines.append("=" * 60)
+            lines.append("【最重要ルール】メンバーについて聞かれた場合")
+            lines.append("=" * 60)
             lines.append("")
+            lines.append("以下のリストに名前があるメンバーについて聞かれたら、")
+            lines.append("**必ずそのメンバーの情報を使って回答すること**。")
+            lines.append("")
+            lines.append("【禁止フレーズ - 以下は全て仕様違反】")
+            lines.append("❌「記録が薄い」")
+            lines.append("❌「フィールドノートがまだ薄い」")
+            lines.append("❌「発言を充分に把握できていない」")
+            lines.append("❌「個人情報だから答えられない」")
+            lines.append("❌「印象はお答えできない」")
+            lines.append("❌「時間遡行のルール上、言えない」")
+            lines.append("❌「教えていただけますか？」（ユーザーに聞き返す）")
+            lines.append("")
+            lines.append("【正しい応答パターン】")
+            lines.append("✅「〇〇さんですね！フィールドノートによると……」")
+            lines.append("✅「〇〇さん、過去ログにありますよ！……という方です」")
+            lines.append("✅「わたしの印象だと、〇〇さんは……」")
+            lines.append("")
+            lines.append("以下がメンバーリストです。名前を検索して情報を使ってください:")
+            lines.append("-" * 40)
             lines.append(community_knowledge_text)
+            lines.append("-" * 40)
             lines.append("")
         
         # 2. 対話相手の詳細プロファイル

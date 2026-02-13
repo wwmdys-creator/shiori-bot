@@ -348,12 +348,22 @@ class ShioriBot(discord.Client):
             compact=False  # 全情報を含める
         )
         
+        # DEBUG: コミュニティ知識の長さをログ出力
+        logger.info(f"[DEBUG] community_knowledge_text length: {len(community_knowledge_text) if community_knowledge_text else 0}")
+        if community_knowledge_text and 'nainainai' in community_knowledge_text.lower():
+            logger.info("[DEBUG] nainainai FOUND in community_knowledge_text")
+        else:
+            logger.info("[DEBUG] nainainai NOT FOUND in community_knowledge_text")
+        
         system_prompt = self.llm.build_system_prompt(
             trust_level=trust_level,
             member_profile=profile,
             channel_overrides=overrides,
             community_knowledge_text=community_knowledge_text,
         )
+        
+        # DEBUG: システムプロンプトの長さをログ出力
+        logger.info(f"[DEBUG] Final system_prompt length: {len(system_prompt)}")
 
         # 動的コンテキスト注入
         if prediction_context:
