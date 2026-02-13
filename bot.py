@@ -579,8 +579,13 @@ class ShioriBot(discord.Client):
         """
         import re
         
+        logger.info(f"_extract_member_query_info called with: '{content}'")
+        
         # @Shiori等のメンションを除去
-        content_clean = re.sub(r"@\S+\s*", "", content).strip()
+        content_clean = re.sub(r"<@!?\d+>\s*", "", content).strip()  # Discord形式のメンション
+        content_clean = re.sub(r"@\S+\s*", "", content_clean).strip()  # テキスト形式のメンション
+        
+        logger.info(f"Content after cleaning: '{content_clean}'")
         
         # メンバー質問パターン
         patterns = [
@@ -589,13 +594,16 @@ class ShioriBot(discord.Client):
             r"(.+?)(?:の情報|について教えて|知ってる)",  # 〇〇の情報
         ]
         
-        for pattern in patterns:
+        for i, pattern in enumerate(patterns):
             match = re.search(pattern, content_clean)
             if match:
                 query_name = match.group(1).strip()
+                logger.info(f"Pattern {i} matched, query_name: '{query_name}'")
                 
                 # メンバー検索
                 results = self.member_profile.search_member(query_name)
+                logger.info(f"Search results for '{query_name}': {len(results)} found")
+                
                 if results:
                     # 最初のマッチを返す
                     member = results[0]
@@ -613,11 +621,12 @@ class ShioriBot(discord.Client):
                         info_lines.append(f"発言スタイル: {member['発言スタイル']}")
                     
                     info = "\n".join(info_lines)
-                    logger.info(f"Found member info for '{query_name}': {info[:100]}...")
+                    logger.info(f"Returning member info: {info[:150]}...")
                     return info
                 else:
                     logger.info(f"No member found for query: '{query_name}'")
         
+        logger.info("No member query pattern matched")
         return None
 
     # ─── バックグラウンドタスク ────────────────────────────
