@@ -226,6 +226,9 @@ class LLMClient:
         """
         lines = []
 
+        # デバッグログ
+        logger.info(f"_build_community_knowledge_block called with community_knowledge length: {len(community_knowledge) if community_knowledge else 0}")
+
         # 1. 全体コミュニティ知識（Tier A-B + コンセンサス）
         if community_knowledge and community_knowledge != "（コミュニティ知識なし）":
             lines.append("## サーバーのコミュニティ知識")
@@ -253,7 +256,9 @@ class LLMClient:
             if not lines:
                 lines.append("（対話相手のプロファイル情報なし）")
 
-        return "\n".join(lines) if lines else "（コミュニティ知識なし）"
+        result = "\n".join(lines) if lines else "（コミュニティ知識なし）"
+        logger.info(f"_build_community_knowledge_block result length: {len(result)}")
+        return result
 
     def convert_context_to_api_format(
         self,

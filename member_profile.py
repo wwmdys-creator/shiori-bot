@@ -85,50 +85,56 @@ class MemberProfileManager:
         """
         profiles = {}
 
-        # メンバーセクション開始位置を見つける（## Tier-の後）
-        tier_start = content.find("## Tier-")
-        if tier_start == -1:
-            # Tierセクションがない場合は全体をパース
-            member_content = content
-        else:
-            member_content = content[tier_start:]
+        # Tierセクションごとに分割してパース
+        tier_pattern = r"## (Tier-[A-C]):[^\n]*\n([\s\S]*?)(?=\n## Tier-|\Z)"
+        tier_matches = re.findall(tier_pattern, content)
 
-        # H3 ヘッダーパターン: ### DisplayName（username）
-        # ただし「動的メモ」「ファイル仕様」などはスキップ
+        if not tier_matches:
+            # Tierセクションがない場合は全体をパース（Tierなし）
+            self._parse_profiles_from_block(content, None, profiles)
+        else:
+            for tier_match in tier_matches:
+                tier = tier_match[0].replace("Tier-", "")  # "A", "B", "C"
+                block = tier_match[1]
+                self._parse_profiles_from_block(block, tier, profiles)
+
+        return profiles
+
+    def _parse_profiles_from_block(
+        self, block: str, tier: str | None, profiles: dict
+    ) -> None:
+        """ブロック内のプロファイルをパースする。"""
+        # H3 ヘッダーパターン
         pattern = r"###\s+([^（\n]+)(?:（([^）]+)）)?\s*\n([\s\S]*?)(?=\n###|\n---|\n## |\Z)"
-        matches = re.findall(pattern, member_content)
+        matches = re.findall(pattern, block)
+
+        skip_names = ["動的メモ", "ファイル仕様", "使用ガイド", "合意度スケール"]
 
         for match in matches:
             display_name = match[0].strip()
-            username = match[1].strip() if match[1] else display_name  # usernameがなければdisplay_nameを使用
-            block = match[2]
+            username = match[1].strip() if match[1] else display_name
+            profile_block = match[2]
 
-            # スキップすべきセクション
-            skip_names = ["動的メモ", "ファイル仕様", "使用ガイド", "合意度スケール"]
             if any(skip in display_name for skip in skip_names):
                 continue
 
             profile = {"display_name": display_name}
+            if tier:
+                profile["tier"] = tier
 
-            # フィールドパターン: - **key**: value
+            # フィールドパターン
             field_pattern = r"-\s+\*\*([^*]+)\*\*:\s*(.+?)(?=\n-\s+\*\*|\n###|\n---|\n## |\Z)"
-            field_matches = re.findall(field_pattern, block, re.DOTALL)
+            field_matches = re.findall(field_pattern, profile_block, re.DOTALL)
 
             for key, val in field_matches:
                 key = key.strip()
                 val = val.strip()
-
-                # 空値や動的メモはスキップ
                 if not val or key == "動的メモ":
                     continue
-
                 profile[key] = val
 
-            # 最低限のフィールドがあるプロファイルのみ追加
-            if len(profile) > 1:  # display_name以外に何かある
+            if len(profile) > 1:
                 profiles[username] = profile
-
-        return profiles
 
     def _build_user_id_map(self) -> None:
         """user_id → username のマッピングを構築。"""
