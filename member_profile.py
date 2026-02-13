@@ -64,6 +64,9 @@ class MemberProfileManager:
             self.profiles = self._parse_profiles(content)
             self._build_user_id_map()
             logger.info(f"Loaded {len(self.profiles)} profiles")
+            # デバッグ: ロードしたプロファイル名を出力
+            profile_names = list(self.profiles.keys())[:10]
+            logger.info(f"Profile names (first 10): {profile_names}")
         except Exception as e:
             logger.error(f"Failed to load profiles: {e}")
 
@@ -76,6 +79,8 @@ class MemberProfileManager:
         - **表示名**: 橋
         - **ポジション**: マニアックで鋭い洞察力の持ち主
         - **関心領域**: サブカル漫画、UFO、哲学
+        
+        ### 動的メモ  ← これはスキップ
         """
         profiles = {}
 
@@ -89,6 +94,10 @@ class MemberProfileManager:
             username = match[1].strip() if match[1] else display_name
             block = match[2]
 
+            # 「動的メモ」セクションはスキップ
+            if display_name == "動的メモ" or username == "動的メモ":
+                continue
+
             profile = {"display_name": display_name}
 
             # フィールドパターン: - **key**: value または - key: value
@@ -99,14 +108,16 @@ class MemberProfileManager:
                 key = key.strip()
                 val = val.strip()
 
-                # 「動的メモ」セクションはスキップ
+                # 「動的メモ」フィールドや空値はスキップ
                 if key == "動的メモ" or not val:
                     continue
 
                 # user_id は文字列として保存（実際のデータはusername形式）
                 profile[key] = val
 
-            profiles[username] = profile
+            # 最低限のフィールドがあるプロファイルのみ追加
+            if len(profile) > 1:  # display_name以外に何かある
+                profiles[username] = profile
 
         return profiles
 
