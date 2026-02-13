@@ -351,7 +351,7 @@ class ShioriBot(discord.Client):
         # STEP 9.5: メンバー質問の検出とハイライト
         # ユーザーのメッセージからメンバー名を抽出し、該当プロファイルをハイライト
         queried_member_highlight = self._extract_and_highlight_queried_member(
-            message_content, community_knowledge_text
+            message.content, community_knowledge_text
         )
         
         # DEBUG: ハイライトされたメンバー情報をログ出力
