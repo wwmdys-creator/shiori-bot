@@ -44,6 +44,15 @@ class MemberProfileManager:
 
     async def _load_profiles(self) -> None:
         """members_extended.md を読み込む。"""
+        import os
+        # デバッグ: 現在のディレクトリとファイル一覧を出力
+        logger.info(f"Current working directory: {os.getcwd()}")
+        logger.info(f"Files in current directory: {os.listdir('.')}")
+        if os.path.exists('data'):
+            logger.info(f"Files in data/: {os.listdir('data')}")
+        else:
+            logger.warning("data/ directory does not exist!")
+        
         filepath = Path("data/members_extended.md")
 
         if not filepath.exists():
