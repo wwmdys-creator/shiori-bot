@@ -103,7 +103,7 @@ class ShioriBot(discord.Client):
 
         # 1. 依存なしモジュール
         self.channel_config = ChannelConfig()
-        self.rate_limiter = RateLimiter(cooldown_seconds=30)
+        self.rate_limiter = RateLimiter(cooldown_seconds=5)
         self.member_profile = MemberProfileManager()
         self.trust = TrustManager()
         self.reactions = ReactionManager()
