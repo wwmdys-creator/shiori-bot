@@ -283,6 +283,7 @@ class MemberProfileManager:
         """名前や表示名でメンバーを検索する。
 
         部分一致で検索し、関連するプロファイルをリストで返す。
+        備考欄の旧名なども検索対象に含める。
 
         Args:
             query: 検索クエリ（名前の一部）
@@ -294,28 +295,18 @@ class MemberProfileManager:
         query_lower = query.lower()
         
         logger.info(f"search_member: query='{query}', profiles count={len(self.profiles)}")
-        
-        # デバッグ: 最初の5つのプロファイルのキーと表示名を出力
-        sample_profiles = list(self.profiles.items())[:5]
-        for username, profile in sample_profiles:
-            dn = profile.get("display_name", "N/A")
-            logger.info(f"  Profile sample: username='{username}', display_name='{dn}'")
-        
-        # 橋を含むプロファイルを探す
-        for username, profile in self.profiles.items():
-            display_name = profile.get("display_name", profile.get("表示名", ""))
-            if "橋" in username or "橋" in display_name:
-                logger.info(f"  Found 橋 in: username='{username}', display_name='{display_name}'")
 
         for username, profile in self.profiles.items():
             display_name = profile.get("display_name", profile.get("表示名", ""))
+            備考 = profile.get("備考", "")
             
-            # 日本語は大文字小文字がないのでそのまま比較も追加
+            # username, display_name, 備考（旧名など）を検索対象に
             if (query_lower in username.lower() or 
                 query_lower in display_name.lower() or
                 query in username or
-                query in display_name):
-                logger.info(f"search_member: MATCH found - username={username}, display_name={display_name}")
+                query in display_name or
+                query in 備考):
+                logger.info(f"search_member: MATCH found - username={username}, display_name={display_name}, 備考={備考[:50]}")
                 results.append(profile)
 
         logger.info(f"search_member: returning {len(results)} results")
