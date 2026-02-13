@@ -74,49 +74,62 @@ class MemberProfileManager:
         """members_extended.md をパースする。
 
         実際のフォーマット:
-        ### 橋（hashimae）
-        - **user_id**: hashimae
-        - **表示名**: 橋
-        - **ポジション**: マニアックで鋭い洞察力の持ち主
-        - **関心領域**: サブカル漫画、UFO、哲学
+        ## Tier-A: コアメンバー
+        ---
+        ### Rom🧄（katsucurry_apple）
+        - **user_id**: katsucurry_apple
+        - **表示名**: Rom🧄
+        - **ポジション**: サーバー最多投稿者
         
         ### 動的メモ  ← これはスキップ
         """
         profiles = {}
 
+        # メンバーセクション開始位置を見つける（## Tier-の後）
+        tier_start = content.find("## Tier-")
+        if tier_start == -1:
+            # Tierセクションがない場合は全体をパース
+            member_content = content
+        else:
+            member_content = content[tier_start:]
+
         # H3 ヘッダーパターン: ### DisplayName（username）
-        # または ### DisplayName
-        pattern = r"###\s+([^（\n]+)(?:（([^）]+)）)?\s*\n([\s\S]*?)(?=\n###|\n---|\Z)"
-        matches = re.findall(pattern, content)
+        # ただし「動的メモ」「ファイル仕様」などはスキップ
+        pattern = r"###\s+([^（\n]+)(?:（([^）]+)）)?\s*\n([\s\S]*?)(?=\n###|\n---|\n## |\Z)"
+        matches = re.findall(pattern, member_content)
 
         for match in matches:
             display_name = match[0].strip()
-            username = match[1].strip() if match[1] else display_name
+            username = match[1].strip() if match[1] else None
             block = match[2]
 
-            # 「動的メモ」セクションはスキップ
-            if display_name == "動的メモ" or username == "動的メモ":
+            # スキップすべきセクション
+            skip_names = ["動的メモ", "ファイル仕様", "使用ガイド", "合意度スケール"]
+            if any(skip in display_name for skip in skip_names):
+                continue
+            
+            # usernameがない場合はスキップ（メタデータセクションの可能性）
+            if not username:
                 continue
 
             profile = {"display_name": display_name}
 
-            # フィールドパターン: - **key**: value または - key: value
-            field_pattern = r"-\s+\*?\*?([^*:\n]+)\*?\*?:\s*(.+?)(?=\n-|\n###|\n---|\Z)"
+            # フィールドパターン: - **key**: value
+            field_pattern = r"-\s+\*\*([^*]+)\*\*:\s*(.+?)(?=\n-\s+\*\*|\n###|\n---|\n## |\Z)"
             field_matches = re.findall(field_pattern, block, re.DOTALL)
 
             for key, val in field_matches:
                 key = key.strip()
                 val = val.strip()
 
-                # 「動的メモ」フィールドや空値はスキップ
-                if key == "動的メモ" or not val:
+                # 空値や動的メモはスキップ
+                if not val or key == "動的メモ":
                     continue
 
-                # user_id は文字列として保存（実際のデータはusername形式）
                 profile[key] = val
 
             # 最低限のフィールドがあるプロファイルのみ追加
-            if len(profile) > 1:  # display_name以外に何かある
+            if len(profile) > 1 and username:
                 profiles[username] = profile
 
         return profiles
@@ -372,8 +385,16 @@ class MemberProfileManager:
             str: メンバー簡易一覧
         """
         briefs = []
-        for username, profile in list(self.profiles.items())[:limit]:
+        count = 0
+        for username, profile in self.profiles.items():
+            # 動的メモや無効なエントリをスキップ
+            if username == "動的メモ" or "動的メモ" in username:
+                continue
+            
             name = profile.get("display_name", username)
+            if name == "動的メモ" or "動的メモ" in name:
+                continue
+                
             # 各種フィールド名に対応（日本語/英語両方）
             position = profile.get("ポジション", profile.get("position", ""))
             interests = profile.get("関心領域", profile.get("interests", ""))
@@ -388,6 +409,9 @@ class MemberProfileManager:
                 brief += f": {expertise[:60]}"
 
             briefs.append(brief)
+            count += 1
+            if count >= limit:
+                break
 
         return "\n".join(briefs) if briefs else ""
 
