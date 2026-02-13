@@ -483,6 +483,64 @@ class MemberProfileManager:
 
         return None
 
+    def find_member_by_name(self, name: str) -> dict | None:
+        """名前（部分一致）でメンバープロファイルを検索する。
+        
+        Args:
+            name: 検索する名前（部分一致）
+            
+        Returns:
+            dict | None: プロファイル辞書。見つからない場合はNone。
+        """
+        name_lower = name.lower()
+        
+        # 完全一致を優先
+        for key, profile in self.profiles.items():
+            if key.lower() == name_lower:
+                return profile
+            display_name = profile.get("display_name", "").lower()
+            if display_name == name_lower:
+                return profile
+        
+        # 部分一致
+        for key, profile in self.profiles.items():
+            if name_lower in key.lower():
+                return profile
+            display_name = profile.get("display_name", "").lower()
+            if name_lower in display_name:
+                return profile
+        
+        return None
+
+    def get_member_summary_for_highlight(self, name: str) -> str | None:
+        """メンバー名からハイライト用の要約を生成する。
+        
+        Args:
+            name: 検索する名前
+            
+        Returns:
+            str | None: ハイライト用要約テキスト。見つからない場合はNone。
+        """
+        profile = self.find_member_by_name(name)
+        if not profile:
+            return None
+        
+        display_name = profile.get("display_name", name)
+        parts = [f"【{display_name}さんのプロファイル】"]
+        
+        if profile.get("position"):
+            parts.append(f"ポジション: {profile['position']}")
+        if profile.get("expertise"):
+            parts.append(f"関心領域: {profile['expertise']}")
+        if profile.get("style"):
+            parts.append(f"発言スタイル: {profile['style']}")
+        if profile.get("ideology"):
+            parts.append(f"思想的特徴: {profile['ideology']}")
+        if profile.get("claims"):
+            parts.append(f"代表的主張: {profile['claims']}")
+        
+        return "\n".join(parts) if len(parts) > 1 else None
+
     def get_display_name(self, user_id: int) -> str:
         """user_idから表示名を返す。
 
