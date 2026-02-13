@@ -292,15 +292,21 @@ class MemberProfileManager:
         """
         results = []
         query_lower = query.lower()
+        
+        logger.info(f"search_member: query='{query}', profiles count={len(self.profiles)}")
 
         for username, profile in self.profiles.items():
             display_name = profile.get("display_name", profile.get("表示名", ""))
             
-            # usernameまたは表示名に部分一致
+            # 日本語は大文字小文字がないのでそのまま比較も追加
             if (query_lower in username.lower() or 
-                query_lower in display_name.lower()):
+                query_lower in display_name.lower() or
+                query in username or
+                query in display_name):
+                logger.info(f"search_member: MATCH found - username={username}, display_name={display_name}")
                 results.append(profile)
 
+        logger.info(f"search_member: returning {len(results)} results")
         return results
 
     def get_profile_summary(self, user_id: int = None, username: str = None) -> str:
