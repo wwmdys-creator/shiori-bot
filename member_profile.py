@@ -294,6 +294,18 @@ class MemberProfileManager:
         query_lower = query.lower()
         
         logger.info(f"search_member: query='{query}', profiles count={len(self.profiles)}")
+        
+        # デバッグ: 最初の5つのプロファイルのキーと表示名を出力
+        sample_profiles = list(self.profiles.items())[:5]
+        for username, profile in sample_profiles:
+            dn = profile.get("display_name", "N/A")
+            logger.info(f"  Profile sample: username='{username}', display_name='{dn}'")
+        
+        # 橋を含むプロファイルを探す
+        for username, profile in self.profiles.items():
+            display_name = profile.get("display_name", profile.get("表示名", ""))
+            if "橋" in username or "橋" in display_name:
+                logger.info(f"  Found 橋 in: username='{username}', display_name='{display_name}'")
 
         for username, profile in self.profiles.items():
             display_name = profile.get("display_name", profile.get("表示名", ""))
