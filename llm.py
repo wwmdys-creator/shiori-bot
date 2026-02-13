@@ -39,19 +39,9 @@ class LLMClient:
         """system_prompt.txt を読み込む。"""
         filepath = Path("system_prompt.txt")
         if not filepath.exists():
-            # data/ ディレクトリも試す
-            filepath = Path("data/system_prompt.txt")
-        if not filepath.exists():
-            logger.warning("system_prompt.txt not found in root or data/, using empty template")
+            logger.warning("system_prompt.txt not found, using empty template")
             return ""
-        content = filepath.read_text(encoding="utf-8")
-        logger.info(f"[DEBUG] Loaded system_prompt.txt from {filepath}, length: {len(content)}")
-        # 重要なセクションの存在確認
-        if "§6.6" in content:
-            logger.info("[DEBUG] §6.6 section FOUND in system_prompt.txt")
-        else:
-            logger.warning("[DEBUG] §6.6 section NOT FOUND in system_prompt.txt")
-        return content
+        return filepath.read_text(encoding="utf-8")
 
     async def generate_response(
         self,
@@ -150,7 +140,7 @@ class LLMClient:
         trust_level: int,
         member_profile: dict | None,
         channel_overrides: dict | None,
-        community_knowledge_text: str | None = None,
+        community_knowledge: str | None = None,
     ) -> str:
         """system_prompt.txt + 動的コンテキストを結合してシステムプロンプトを構築する。
 
@@ -158,9 +148,9 @@ class LLMClient:
 
         Args:
             trust_level: 信頼度レベル（1-5）
-            member_profile: member_profile.py の get_profile() 戻り値（対話相手のプロファイル）
+            member_profile: member_profile.py の get_profile() 戻り値
             channel_overrides: channel_config.py の get_overrides() 戻り値
-            community_knowledge_text: member_profile.py の get_community_knowledge_text() 戻り値（全メンバー情報）
+            community_knowledge: member_profile.py の get_community_knowledge_text() 戻り値
 
         Returns:
             str: 完成したシステムプロンプト
@@ -179,9 +169,9 @@ class LLMClient:
         channel_block = self._build_channel_overrides_block(channel_overrides)
         prompt = prompt.replace("{channel_overrides_block}", channel_block)
 
-        # コミュニティ知識ブロック（全メンバー情報 + 対話相手のプロファイル）
+        # コミュニティ知識ブロック（対話相手プロファイル + 全体知識）
         community_block = self._build_community_knowledge_block(
-            member_profile, community_knowledge_text
+            member_profile, community_knowledge
         )
         prompt = prompt.replace("{community_knowledge_block}", community_block)
 
@@ -223,80 +213,43 @@ class LLMClient:
     def _build_community_knowledge_block(
         self,
         member_profile: dict | None,
-        community_knowledge_text: str | None = None,
+        community_knowledge: str | None = None,
     ) -> str:
         """コミュニティ知識ブロックを構築する。
-        
-        v4.5 §6.6対応: メンバー質問に答えるために全メンバー情報を含める。
-        印象応答も可能。
-        
+
         Args:
-            member_profile: 対話相手のプロファイル
-            community_knowledge_text: 全メンバー・用語・コンセンサス情報
-            
+            member_profile: 対話相手の個別プロファイル
+            community_knowledge: Tier A-Bメンバー + コンセンサス情報
+
         Returns:
             str: コミュニティ知識ブロック
         """
         lines = []
-        
-        # 1. 全メンバー・コミュニティ知識（§6.6 メンバー質問応答に必須）
-        if community_knowledge_text:
-            lines.append("### サーバーメンバー・コミュニティ知識")
+
+        # 1. 全体コミュニティ知識（Tier A-B + コンセンサス）
+        if community_knowledge and community_knowledge != "（コミュニティ知識なし）":
+            lines.append("## サーバーのコミュニティ知識")
+            lines.append(community_knowledge)
             lines.append("")
-            lines.append("=" * 60)
-            lines.append("【最重要ルール】メンバーについて聞かれた場合")
-            lines.append("=" * 60)
-            lines.append("")
-            lines.append("以下のリストに名前があるメンバーについて聞かれたら、")
-            lines.append("**必ずそのメンバーの情報を使って回答すること**。")
-            lines.append("")
-            lines.append("【禁止フレーズ - 以下は全て仕様違反】")
-            lines.append("❌「記録が薄い」")
-            lines.append("❌「フィールドノートがまだ薄い」")
-            lines.append("❌「発言を充分に把握できていない」")
-            lines.append("❌「個人情報だから答えられない」")
-            lines.append("❌「印象はお答えできない」")
-            lines.append("❌「時間遡行のルール上、言えない」")
-            lines.append("❌「教えていただけますか？」（ユーザーに聞き返す）")
-            lines.append("")
-            lines.append("【正しい応答パターン】")
-            lines.append("✅「〇〇さんですね！フィールドノートによると……」")
-            lines.append("✅「〇〇さん、過去ログにありますよ！……という方です」")
-            lines.append("✅「わたしの印象だと、〇〇さんは……」")
-            lines.append("")
-            lines.append("以下がメンバーリストです。名前を検索して情報を使ってください:")
-            lines.append("-" * 40)
-            lines.append(community_knowledge_text)
-            lines.append("-" * 40)
-            lines.append("")
-        
-        # 2. 対話相手の詳細プロファイル
-        lines.append("### 対話相手のプロファイル")
-        if not member_profile:
-            lines.append("（対話相手のプロファイル情報なし。新規メンバーの可能性あり）")
-        else:
+
+        # 2. 対話相手の個別プロファイル
+        if member_profile:
+            lines.append("## 現在の対話相手")
             if member_profile.get("display_name"):
-                lines.append(f"対話相手: {member_profile['display_name']}さん")
-            # 新フィールド対応
-            if member_profile.get("position"):
-                lines.append(f"ポジション: {member_profile['position']}")
-            if member_profile.get("expertise"):
-                lines.append(f"関心領域: {member_profile['expertise']}")
-            if member_profile.get("style"):
-                lines.append(f"発言スタイル: {member_profile['style']}")
-            if member_profile.get("ideology"):
-                lines.append(f"思想的特徴: {member_profile['ideology']}")
-            if member_profile.get("claims"):
-                lines.append(f"代表的主張: {member_profile['claims']}")
-            # 旧フィールドもフォールバック対応
+                lines.append(f"名前: {member_profile['display_name']}さん")
             if member_profile.get("tier"):
-                lines.append(f"活動レベル: Tier {member_profile['tier']}")
+                lines.append(f"Tier: {member_profile['tier']}")
+            if member_profile.get("expertise"):
+                lines.append(f"専門領域: {member_profile['expertise']}")
             if member_profile.get("prediction_topics"):
                 lines.append(f"主な予測トピック: {member_profile['prediction_topics']}")
             if member_profile.get("notes"):
                 lines.append(f"観察所見: {member_profile['notes']}")
+        else:
+            if not lines:
+                lines.append("（対話相手のプロファイル情報なし）")
 
-        return "\n".join(lines) if lines else "（コミュニティ知識情報なし）"
+        return "\n".join(lines) if lines else "（コミュニティ知識なし）"
 
     def convert_context_to_api_format(
         self,
