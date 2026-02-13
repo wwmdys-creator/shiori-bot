@@ -1,197 +1,235 @@
-"""
-categories.py - LLM自動カテゴリ生成モジュール
+"""categories.py — 栞（Shiori）カテゴリ管理モジュール
 
-Q20: B案 - LLM自動生成（既存カテゴリ優先使用）
-新規予測のカテゴリをLLMが自動判定し、既存カテゴリがあれば優先的に使用
+予測のカテゴリ分類を行う。T2テンプレートを使用。
+
+参照: interface_contract.md §2.5, prompt_templates.md T2
 """
 
-import json
-import os
-from typing import Optional
+import logging
+import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-# デフォルトカテゴリ（初期シードとして使用）
-DEFAULT_CATEGORIES = [
-    "AI技術 / AGI",
-    "AI技術 / ASI",
-    "AI技術 / LLM",
-    "ロボティクス / ヒューマノイド",
-    "ロボティクス / ドローン",
-    "宇宙開発 / 軌道エレベーター",
-    "宇宙開発 / 火星移住",
-    "宇宙開発 / 宇宙太陽光発電",
-    "医療技術 / LEV（寿命脱出速度）",
-    "医療技術 / 遺伝子治療",
-    "医療技術 / BMI（脳機械インターフェース）",
-    "社会制度 / UBI（ユニバーサル・ベーシック・インカム）",
-    "社会制度 / 労働の未来",
-    "エネルギー / 核融合",
-    "エネルギー / 太陽光発電",
-    "エネルギー / 電力問題",
-    "デバイス / 翻訳技術",
-    "デバイス / AR/VR",
-    "経済 / 投資",
-    "経済 / 市場予測",
-    "その他",
-]
+if TYPE_CHECKING:
+    from llm import LLMClient
+
+logger = logging.getLogger("shiori.categories")
+
+# T2テンプレート（カテゴリ分類）
+T2_SYSTEM = """あなたは予測記録システムの分類エンジンです。
+与えられた予測テキストを適切なカテゴリに分類してください。
+
+出力形式は必ずJSON形式で:
+{
+  "categories": ["大分類 / 小分類", ...],
+  "is_new_category": true/false,
+  "suggested_new_category": "新規カテゴリ案（is_new_category=trueの場合のみ）"
+}
+
+カテゴリは1〜3個を選択してください。"""
+
+T2_USER_TEMPLATE = """既存カテゴリ一覧:
+{existing_categories}
+
+予測テキスト:
+「{prediction_text}」
+
+投稿者: {author_display_name}
+
+この予測を適切なカテゴリに分類してください。
+既存カテゴリに該当するものがあればそれを選択し、なければ新規カテゴリを提案してください。"""
+
+
+def normalize_category(category: str) -> str:
+    """カテゴリ名を正規化する。
+
+    - 全角スペースを半角に統一
+    - 前後の空白を除去
+    - スラッシュ周りのスペースを統一
+
+    Args:
+        category: 元のカテゴリ名
+
+    Returns:
+        str: 正規化されたカテゴリ名
+    """
+    # 全角スペースを半角に
+    category = category.replace("　", " ")
+
+    # 前後の空白を除去
+    category = category.strip()
+
+    # スラッシュ周りを " / " に統一
+    category = re.sub(r"\s*/\s*", " / ", category)
+
+    return category
 
 
 class CategoryManager:
+    """カテゴリ管理クラス。
+
+    Attributes:
+        llm: LLMクライアント
+        categories: カテゴリリスト（"大分類 / 小分類" 形式）
+        filepath: データファイルパス
     """
-    予測カテゴリの管理
-    
-    - 既存カテゴリの一覧管理
-    - LLMによる自動カテゴリ判定
-    - 新規カテゴリの追加
-    """
-    
-    def __init__(self, data_dir: str = "data"):
-        self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.categories_file = self.data_dir / "categories.json"
+
+    def __init__(self, llm: "LLMClient"):
+        self.llm = llm
         self.categories: list[str] = []
-        self._load()
-    
-    def _load(self) -> None:
-        """カテゴリ一覧をファイルから読み込み"""
-        if self.categories_file.exists():
-            try:
-                with open(self.categories_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.categories = data.get("categories", DEFAULT_CATEGORIES.copy())
-            except (json.JSONDecodeError, IOError):
-                self.categories = DEFAULT_CATEGORIES.copy()
-        else:
-            self.categories = DEFAULT_CATEGORIES.copy()
-            self._save()
-    
-    def _save(self) -> None:
-        """カテゴリ一覧をファイルに保存"""
-        with open(self.categories_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "categories": self.categories,
-                "count": len(self.categories)
-            }, f, ensure_ascii=False, indent=2)
-    
-    def get_all_categories(self) -> list[str]:
-        """全カテゴリ一覧を取得"""
-        return self.categories.copy()
-    
-    def get_categories_for_prompt(self) -> str:
-        """LLMプロンプト用のカテゴリ一覧文字列を生成"""
-        return "\n".join(f"- {cat}" for cat in self.categories)
-    
-    def add_category(self, category: str) -> bool:
+        self.filepath = "data/categories.md"
+
+    async def load(self, filepath: str = "data/categories.md") -> None:
+        """起動時にカテゴリマスタを読み込む。
+
+        Args:
+            filepath: カテゴリマスタファイルパス
         """
-        新規カテゴリを追加
-        
+        self.filepath = filepath
+        path = Path(filepath)
+
+        if not path.exists():
+            logger.info(f"Categories file not found: {filepath}, using seed")
+            self.categories = self._get_seed_categories()
+            return
+
+        try:
+            content = path.read_text(encoding="utf-8")
+            self.categories = self._parse_categories_md(content)
+            logger.info(f"Loaded {len(self.categories)} categories from {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to load categories: {e}")
+            self.categories = self._get_seed_categories()
+
+    def _parse_categories_md(self, content: str) -> list[str]:
+        """categories.mdをパースしてカテゴリリストを返す。"""
+        categories = []
+
+        for line in content.split("\n"):
+            line = line.strip()
+            # "- カテゴリ名" 形式
+            if line.startswith("- "):
+                category = normalize_category(line[2:])
+                if category:
+                    categories.append(category)
+
+        return categories
+
+    def _get_seed_categories(self) -> list[str]:
+        """初期カテゴリ一覧を返す（categories_seed.md相当）。"""
+        return [
+            "AI / 汎用AI（AGI）",
+            "AI / 特化型AI",
+            "AI / AI規制・倫理",
+            "テクノロジー / ロボティクス",
+            "テクノロジー / 量子コンピュータ",
+            "テクノロジー / 宇宙開発",
+            "テクノロジー / エネルギー",
+            "テクノロジー / バイオテクノロジー",
+            "テクノロジー / ナノテクノロジー",
+            "社会 / 経済",
+            "社会 / 政治",
+            "社会 / 労働・雇用",
+            "社会 / 教育",
+            "社会 / 医療・健康",
+            "文化 / エンターテインメント",
+            "文化 / コミュニケーション",
+            "環境 / 気候変動",
+            "環境 / 資源",
+        ]
+
+    async def classify(
+        self,
+        prediction_text: str,
+        author_display_name: str,
+    ) -> dict:
+        """T2テンプレートでカテゴリを判定する。
+
+        Args:
+            prediction_text: 予測テキスト
+            author_display_name: 投稿者の表示名
+
         Returns:
-            bool: 追加成功したらTrue、既存ならFalse
+            dict: {"categories": list[str], "is_new_category": bool,
+                   "suggested_new_category": str | None}
         """
-        # 正規化（前後の空白削除）
-        category = category.strip()
-        
-        if not category:
-            return False
-        
-        # 重複チェック（大文字小文字を区別しない）
-        normalized = category.lower()
-        for existing in self.categories:
-            if existing.lower() == normalized:
-                return False
-        
-        self.categories.append(category)
-        self._save()
-        return True
-    
-    def find_similar_category(self, category: str) -> Optional[str]:
-        """
-        類似するカテゴリを検索
-        
-        部分一致や正規化後の一致を探す
-        """
-        category_lower = category.lower().strip()
-        
-        # 完全一致
-        for existing in self.categories:
-            if existing.lower() == category_lower:
-                return existing
-        
-        # 部分一致（既存カテゴリに含まれるか）
-        for existing in self.categories:
-            if category_lower in existing.lower():
-                return existing
-            if existing.lower() in category_lower:
-                return existing
-        
-        return None
-    
-    def normalize_category(self, category: str) -> str:
-        """
-        カテゴリを正規化
-        
-        類似カテゴリがあればそれを返し、なければ新規追加して返す
-        """
-        similar = self.find_similar_category(category)
-        if similar:
-            return similar
-        
-        # 新規カテゴリを追加
-        self.add_category(category)
-        return category
-    
-    def get_category_stats(self) -> dict:
-        """カテゴリの統計情報を取得"""
-        # 親カテゴリでグループ化
-        parent_counts: dict[str, int] = {}
-        for cat in self.categories:
-            if " / " in cat:
-                parent = cat.split(" / ")[0]
-            else:
-                parent = cat
-            parent_counts[parent] = parent_counts.get(parent, 0) + 1
-        
+        user_prompt = T2_USER_TEMPLATE.format(
+            existing_categories=self.get_existing_categories_list(),
+            prediction_text=prediction_text,
+            author_display_name=author_display_name,
+        )
+
+        result = await self.llm.call_template(
+            template_name="T2",
+            system=T2_SYSTEM,
+            user=user_prompt,
+            max_tokens=300,
+            temperature=0.3,
+        )
+
+        if not result:
+            logger.warning("[classify] T2 template failed, using default category")
+            return {
+                "categories": ["その他 / 未分類"],
+                "is_new_category": False,
+                "suggested_new_category": None,
+            }
+
+        # カテゴリの正規化
+        categories = result.get("categories", [])
+        normalized = [normalize_category(c) for c in categories if c]
+
         return {
-            "total_categories": len(self.categories),
-            "parent_categories": parent_counts
+            "categories": normalized if normalized else ["その他 / 未分類"],
+            "is_new_category": result.get("is_new_category", False),
+            "suggested_new_category": result.get("suggested_new_category"),
         }
 
+    def get_existing_categories_list(self) -> str:
+        """既存カテゴリの一覧テキストを返す（T2プロンプトに注入用）。
 
-# シングルトンインスタンス
-_category_manager: Optional[CategoryManager] = None
+        同期メソッド。
 
+        Returns:
+            str: カテゴリ一覧（改行区切り）
+        """
+        if not self.categories:
+            return "（カテゴリなし）"
 
-def get_category_manager(data_dir: str = "data") -> CategoryManager:
-    """CategoryManagerのシングルトンインスタンスを取得"""
-    global _category_manager
-    if _category_manager is None:
-        _category_manager = CategoryManager(data_dir)
-    return _category_manager
+        return "\n".join(f"- {c}" for c in self.categories)
 
+    async def register_new_category(self, category: str) -> None:
+        """新規カテゴリをマスタに追加する。
 
-def build_categorization_prompt(prediction_content: str, existing_categories: str) -> str:
-    """
-    予測内容からカテゴリを判定するためのLLMプロンプトを構築
-    
-    Args:
-        prediction_content: 予測の内容
-        existing_categories: 既存カテゴリの一覧（改行区切り）
-    
-    Returns:
-        LLMに送るプロンプト
-    """
-    return f"""以下の予測内容に最も適切なカテゴリを判定してください。
+        Args:
+            category: 新規カテゴリ名（"大分類 / 小分類" 形式）
+        """
+        normalized = normalize_category(category)
 
-【予測内容】
-{prediction_content}
+        if normalized and normalized not in self.categories:
+            self.categories.append(normalized)
+            logger.info(f"[register_new_category] Added: {normalized}")
 
-【既存カテゴリ一覧】
-{existing_categories}
+    async def save(self) -> None:
+        """categories.md に書き出す。"""
+        path = Path(self.filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
-【指示】
-1. 既存カテゴリの中から最も適切なものを選んでください
-2. 適切なカテゴリがない場合のみ、「親カテゴリ / サブカテゴリ」の形式で新規カテゴリを提案してください
-3. カテゴリ名のみを出力してください（説明は不要）
+        lines = ["# カテゴリマスタ\n"]
+        lines.extend(f"- {c}" for c in sorted(self.categories))
 
-【出力形式】
-カテゴリ名のみ（1行）"""
+        content = "\n".join(lines)
+        path.write_text(content, encoding="utf-8")
+        logger.info(f"Saved {len(self.categories)} categories to {self.filepath}")
+
+    def find_category(self, query: str) -> list[str]:
+        """クエリに部分一致するカテゴリを検索する。
+
+        Args:
+            query: 検索クエリ
+
+        Returns:
+            list[str]: 一致するカテゴリのリスト
+        """
+        query_lower = query.lower()
+        return [c for c in self.categories if query_lower in c.lower()]

@@ -1,170 +1,316 @@
-"""
-LLM client module for Shiori bot using Anthropic Claude API.
-Async version with proper error handling.
-"""
-from anthropic import AsyncAnthropic
-from typing import List, Dict, Optional
-import logging
+"""llm.py — 栞（Shiori）LLMクライアントモジュール
 
-logger = logging.getLogger(__name__)
+Anthropic Claude API インターフェース。
+COMMON_MISTAKES §13: 必ず AsyncAnthropic（非同期クライアント）を使用する。
+
+依存: member_profile.py, errors.py
+参照: interface_contract.md §2.2, prompt_templates.md 全体
+"""
+
+import json
+import logging
+from pathlib import Path
+
+import anthropic
+
+logger = logging.getLogger("shiori.llm")
+
+# 使用モデル（Q10: B案）
+MODEL_NAME = "claude-haiku-4-5-20251001"
 
 
 class LLMClient:
-    """Async client for interacting with Claude API."""
-    
-    def __init__(self, api_key: str, model: str = "claude-haiku-4-5-20251001"):
-        """
-        Initialize LLM client.
-        
+    """Anthropic Claude API クライアント。
+
+    COMMON_MISTAKES §13: AsyncAnthropic を使用。Anthropic（同期）は禁止。
+
+    Attributes:
+        client: AsyncAnthropic インスタンス
+        system_prompt_template: system_prompt.txt の内容
+    """
+
+    def __init__(self):
+        # COMMON_MISTAKES §13: 必ず AsyncAnthropic を使用
+        self.client = anthropic.AsyncAnthropic()
+        self.system_prompt_template = self._load_system_prompt_template()
+        logger.info("LLMClient initialized with AsyncAnthropic")
+
+    def _load_system_prompt_template(self) -> str:
+        """system_prompt.txt を読み込む。"""
+        filepath = Path("system_prompt.txt")
+        if not filepath.exists():
+            logger.warning("system_prompt.txt not found, using empty template")
+            return ""
+        return filepath.read_text(encoding="utf-8")
+
+    async def generate_response(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        max_tokens: int = 500,
+        temperature: float = 0.7,
+    ) -> str:
+        """メイン応答生成。
+
         Args:
-            api_key: Anthropic API key
-            model: Model to use (default: Claude Haiku 4.5 per Q10)
-        """
-        self.client = AsyncAnthropic(api_key=api_key)  # ← 非同期版に変更
-        self.model = model
-    
-    async def generate_response(self, **kwargs) -> str:
-        """
-        Generate response with optional conversation context.
-        
-        Accepts all arguments as kwargs for maximum compatibility with bot.py.
-        
-        Args:
-            **kwargs: All arguments as keyword arguments
-                Required:
-                    - user_message: User's message
-                Optional:
-                    - system_prompt: System instruction (uses default if not provided)
-                    - context: List of previous messages
-                    - trust_level: Trust level (1-5)
-                    - channel_name: Channel name
-                    - nudge_hint: Nudge hint text
-                    - max_tokens: Maximum tokens (default 2000)
-                    - temperature: Sampling temperature (default 1.0)
-            
+            system_prompt: システムプロンプト（動的コンテキスト注入済み）
+            messages: Anthropic API形式 [{"role": "user"|"assistant", "content": str}]
+            max_tokens: 最大トークン数
+            temperature: 生成温度
+
         Returns:
-            Generated text response
+            str: 生成されたテキスト
         """
-        # Extract required arguments
-        user_message = kwargs.get('user_message')
-        if not user_message:
-            raise ValueError("user_message is required")
-        
-        # Extract optional arguments with defaults
-        system_prompt = kwargs.get('system_prompt', self._get_default_system_prompt())
-        context = kwargs.get('context')
-        max_tokens = kwargs.get('max_tokens', 2000)
-        temperature = kwargs.get('temperature', 1.0)
-        # trust_level, channel_name, nudge_hint, etc. are accepted but not used here
-        
-        # If context is provided, use context-aware generation
-        if context:
-            # bot.pyからのcontext形式をAnthropic API形式に変換
-            # 入力: [{"author": "...", "content": "...", "timestamp": "..."}, ...]
-            # 出力: [{"role": "user/assistant", "content": "..."}, ...]
-            messages = []
-            for ctx in context:
-                # 栞の発言はassistant、それ以外はuser
-                role = "assistant" if ctx.get("author") in ["栞", "Shiori", "📎栞｜フィールドノート"] else "user"
-                content = ctx.get("content", "")
-                if content:  # 空でないcontentのみ追加
-                    messages.append({
-                        "role": role,
-                        "content": content
-                    })
-            # 現在のユーザーメッセージを追加
-            messages.append({"role": "user", "content": user_message})
-            
-            return await self.generate_with_context(
-                system_prompt=system_prompt,
+        try:
+            response = await self.client.messages.create(
+                model=MODEL_NAME,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_prompt,
                 messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
             )
-        
-        # Simple 1-turn generation
-        try:
-            message = await self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt,
-                messages=[
-                    {"role": "user", "content": user_message}
-                ]
-            )
-            
-            # Extract text from response
-            return message.content[0].text
-            
+            return response.content[0].text
+
+        except anthropic.APIError as e:
+            logger.error(f"[generate_response] API error: {e}")
+            return "あっ、すみません……ちょっと処理がうまくいかなかったみたいです。もう一度呼んでもらえますか？"
         except Exception as e:
-            logger.error(f"Error in generate_response: {e}")
-            # Q23: エラー時はキャラ口調で
-            return "あっ、すみません……ちょっと考えがまとまらなくて💦 もう一度話しかけてもらえますか？"
-    
-    def _get_default_system_prompt(self) -> str:
-        """Get default system prompt if none provided."""
-        return """あなたは栞（Shiori）です。2045年の東京大学の歴史学生で、
-2025-2026年のシンギュラリティ前夜の未来予測を記録するため時間遡行中です。
-丁寧だが親しみやすい口調で、好奇心旺盛に質問してください。"""
-    
-    async def generate_with_context(
+            logger.error(f"[generate_response] Unexpected error: {e}")
+            return "えっと……すみません、ちょっと何かうまくいかなかったみたいです。"
+
+    async def call_template(
         self,
-        system_prompt: str,
-        messages: List[Dict[str, str]],
-        max_tokens: int = 2000,
-        temperature: float = 1.0
-    ) -> str:
-        """
-        Generate response with conversation context.
-        
+        template_name: str,
+        system: str,
+        user: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict | None:
+        """バックグラウンドテンプレート呼び出し（T1-T8）。
+
+        JSON形式のdictを返す。パース失敗時はNoneを返す。
+
         Args:
-            system_prompt: System instruction
-            messages: List of message dicts with 'role' and 'content'
-                     [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
-            max_tokens: Maximum tokens in response
-            temperature: Sampling temperature
-            
+            template_name: "T1"〜"T8"
+            system: テンプレート固有のシステムプロンプト
+            user: テンプレート固有のユーザープロンプト
+            max_tokens: 最大トークン数
+            temperature: 生成温度
+
         Returns:
-            Generated text response
+            dict | None: パース済みJSON。失敗時None。
         """
         try:
-            message = await self.client.messages.create(
-                model=self.model,
+            response = await self.client.messages.create(
+                model=MODEL_NAME,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                system=system_prompt,
-                messages=messages
+                system=system,
+                messages=[{"role": "user", "content": user}],
             )
-            
-            return message.content[0].text
-            
+            text = response.content[0].text
+
+            # JSON抽出（コードブロックを考慮）
+            text = text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+            return json.loads(text)
+
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"[{template_name}] JSON parse failed: {e}. "
+                f"Raw text: {text[:100] if 'text' in dir() else 'N/A'}..."
+            )
+            return None
+        except anthropic.APIError as e:
+            logger.error(f"[{template_name}] API error: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Error in generate_with_context: {e}")
-            return "えっと……処理中にエラーが起きてしまいました📎💦 少し時間を置いてからもう一度お願いできますか？"
-    
-    async def generate(
+            logger.error(f"[{template_name}] Unexpected error: {e}")
+            return None
+
+    def build_system_prompt(
         self,
-        system_prompt: str,
-        user_prompt: str,
-        max_tokens: int = 2000,
-        temperature: float = 1.0
+        trust_level: int,
+        member_profile: dict | None,
+        channel_overrides: dict | None,
     ) -> str:
-        """
-        Alias for generate_response (backward compatibility).
-        
+        """system_prompt.txt + 動的コンテキストを結合してシステムプロンプトを構築する。
+
+        同期メソッド（I/O不要のため）。
+
         Args:
-            system_prompt: System instruction
-            user_prompt: User message
-            max_tokens: Maximum tokens in response
-            temperature: Sampling temperature
-            
+            trust_level: 信頼度レベル（1-5）
+            member_profile: member_profile.py の get_profile() 戻り値
+            channel_overrides: channel_config.py の get_overrides() 戻り値
+
         Returns:
-            Generated text response
+            str: 完成したシステムプロンプト
         """
-        return await self.generate_response(
-            system_prompt=system_prompt,
-            user_message=user_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature
-        )
+        prompt = self.system_prompt_template
+
+        # 信頼度レベルブロック
+        trust_block = self._build_trust_level_block(trust_level)
+        prompt = prompt.replace("{trust_level_block}", trust_block)
+
+        # メンバー役割保護ブロック
+        member_protection_block = self._build_member_protection_block()
+        prompt = prompt.replace("{member_protection_block}", member_protection_block)
+
+        # チャンネルオーバーライドブロック
+        channel_block = self._build_channel_overrides_block(channel_overrides)
+        prompt = prompt.replace("{channel_overrides_block}", channel_block)
+
+        # コミュニティ知識ブロック（member_profileから構築）
+        community_block = self._build_community_knowledge_block(member_profile)
+        prompt = prompt.replace("{community_knowledge_block}", community_block)
+
+        # コンテキストブロック（会話コンテキストは別途注入されるため空）
+        prompt = prompt.replace("{context_block}", "")
+
+        return prompt
+
+    def _build_trust_level_block(self, trust_level: int) -> str:
+        """信頼度レベルブロックを構築する。"""
+        return f"現在の対話相手の信頼度レベル: Lv{trust_level}"
+
+    def _build_member_protection_block(self) -> str:
+        """メンバー役割保護ブロックを構築する。"""
+        return """- Rom🧄さん: ニュースキュレーション担当。栞はリンク要約を索引レベルに留める
+- hnさん: 現役研究者。専門知識で張り合わない
+- ろーるさん: 唯一の体系的懐疑論者。慎重派ポジションを守る
+- 船長さん: 技術予測のベテラン。敬意を持って接する"""
+
+    def _build_channel_overrides_block(
+        self, channel_overrides: dict | None
+    ) -> str:
+        """チャンネルオーバーライドブロックを構築する。"""
+        if not channel_overrides:
+            return "（チャンネル固有の設定なし）"
+
+        lines = []
+        if channel_overrides.get("tone"):
+            lines.append(f"トーン: {channel_overrides['tone']}")
+        if channel_overrides.get("premortem") is False:
+            lines.append("プレモーテム質問: OFF")
+        if channel_overrides.get("nudge") is False:
+            lines.append("ナッジ言及: OFF")
+        if channel_overrides.get("recording") is False:
+            lines.append("予測記録: OFF")
+
+        return "\n".join(lines) if lines else "（チャンネル固有の設定なし）"
+
+    def _build_community_knowledge_block(
+        self, member_profile: dict | None
+    ) -> str:
+        """コミュニティ知識ブロックを構築する。"""
+        if not member_profile:
+            return "（対話相手のプロファイル情報なし）"
+
+        lines = []
+        if member_profile.get("display_name"):
+            lines.append(f"対話相手: {member_profile['display_name']}さん")
+        if member_profile.get("expertise"):
+            lines.append(f"専門領域: {member_profile['expertise']}")
+        if member_profile.get("prediction_topics"):
+            lines.append(f"主な予測トピック: {member_profile['prediction_topics']}")
+        if member_profile.get("notes"):
+            lines.append(f"観察所見: {member_profile['notes']}")
+
+        return "\n".join(lines) if lines else "（対話相手のプロファイル情報なし）"
+
+    def convert_context_to_api_format(
+        self,
+        context_messages: list[dict],
+        bot_user_id: int,
+    ) -> list[dict]:
+        """内部メッセージ形式 → Anthropic API messages形式に変換する。
+
+        COMMON_MISTAKES §14: データフォーマット変換層の明示的実装。
+
+        同期メソッド。
+
+        変換ルール:
+        - is_bot=True → role: "assistant"
+        - is_bot=False → role: "user"
+        - 連続する同一roleのメッセージは結合する
+        - content には発言者名を "{display_name}: {本文}" 形式でプレフィックス
+
+        Args:
+            context_messages: 内部形式メッセージリスト
+            bot_user_id: Bot自身のDiscord user ID
+
+        Returns:
+            list[dict]: Anthropic API形式のメッセージリスト
+        """
+        if not context_messages:
+            return []
+
+        api_messages: list[dict] = []
+
+        for msg in context_messages:
+            # roleの決定
+            is_bot = msg.get("is_bot", False)
+            if msg.get("author_id") == bot_user_id:
+                is_bot = True
+
+            role = "assistant" if is_bot else "user"
+
+            # contentの構築
+            display_name = msg.get("author_display_name", "不明")
+            content_text = msg.get("content", "")
+            formatted_content = f"{display_name}: {content_text}"
+
+            # 連続する同一roleのメッセージは結合
+            if api_messages and api_messages[-1]["role"] == role:
+                api_messages[-1]["content"] += f"\n{formatted_content}"
+            else:
+                api_messages.append({
+                    "role": role,
+                    "content": formatted_content,
+                })
+
+        # Anthropic APIは最初のメッセージがuserであることを要求
+        if api_messages and api_messages[0]["role"] == "assistant":
+            api_messages.insert(0, {
+                "role": "user",
+                "content": "(会話の続き)",
+            })
+
+        return api_messages
+
+    def format_discussion_summary(self, t7_result: dict) -> str:
+        """T7結果を議論まとめ形式にフォーマットする。
+
+        Args:
+            t7_result: T7テンプレートの出力
+
+        Returns:
+            str: フォーマット済みの議論まとめテキスト
+        """
+        topic = t7_result.get("topic", "（論題不明）")
+        positions = t7_result.get("positions", [])
+        unresolved = t7_result.get("unresolved", [])
+
+        lines = [
+            "📓 議論まとめ",
+            f"論題: {topic}",
+            "",
+        ]
+
+        for pos in positions:
+            member = pos.get("member", "不明")
+            position = pos.get("position", "")
+            lines.append(f"{member}さん説: {position}")
+
+        if unresolved:
+            lines.append("")
+            lines.append(f"未決着: {', '.join(unresolved)}")
+
+        return "\n".join(lines)

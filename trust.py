@@ -1,375 +1,313 @@
+"""trust.py — 栞（Shiori）信頼度管理モジュール
+
+メンバーの信頼度スコア（0-100）とレベル（1-5）を管理する。
+
+参照: interface_contract.md §2.3, §6
 """
-trust.py - 信頼度管理モジュール
 
-栞（Shiori）Bot用の5段階信頼度システム
-信頼度は口調のみに影響し、機能品質は全メンバー平等（Q5: A案）
-全員Lv1からスタート（Q14: C案）
-"""
+import logging
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-import os
-import json
-from datetime import datetime, timedelta
-from typing import Optional
-from dataclasses import dataclass, field, asdict
-from enum import IntEnum
+logger = logging.getLogger("shiori.trust")
 
-
-class TrustLevel(IntEnum):
-    """信頼度レベル定義"""
-    FIRST_MEETING = 1   # 📎 初対面 (0-19)
-    COOPERATOR = 2      # 📓 協力者 (20-49)
-    REGULAR = 3         # 🔖 常連情報源 (50-79)
-    RESEARCHER = 4      # 📖 研究協力者 (80-99)
-    MENTOR = 5          # 📚 恩師 (100)
-
-
-# スコアからレベルへの変換テーブル
-SCORE_TO_LEVEL = [
-    (0, 19, TrustLevel.FIRST_MEETING),
-    (20, 49, TrustLevel.COOPERATOR),
-    (50, 79, TrustLevel.REGULAR),
-    (80, 99, TrustLevel.RESEARCHER),
-    (100, 100, TrustLevel.MENTOR),
-]
-
-
-# スコア変動ルール
-SCORE_CHANGES = {
-    # 上昇要因
-    "talk_to_shiori": 3,        # 栞に話しかける
-    "post_prediction": 2,        # 予測投稿
-    "answer_question": 5,        # 質問に回答
-    "self_review": 7,           # 過去予測の自発的振り返り
-    "correct_record": 5,         # 記録の誤り訂正
-    "request_summary": 2,        # 要約依頼
-    "explain_concept": 4,        # 概念の説明
-    "judgment_cooperation": 5,   # 的中判定への協力
-    
-    # 下降要因
-    "inactive_30days": -10,      # 30日間反応なし
-    "refuse_review": -3,         # 答え合わせ拒否
-    "aggressive": -5,            # 攻撃的発言
+# スコア変動表（§6.2）
+SCORE_DELTAS = {
+    "mention": 3,
+    "prediction": 2,
+    "answer": 5,
+    "self_review": 7,
+    "correction": 5,
+    "summary_request": 2,
+    "explanation": 4,
 }
 
-
-# 信頼度レベルごとの口調ガイダンス
-TONE_GUIDANCE = {
-    1: """完全な丁寧語で応答してください。
-「〇〇さん」と必ずさん付けで呼び、初対面の礼儀正しさを維持してください。
-専門用語には必ず説明を添え、相手の理解を確認しながら進めてください。""",
-    
-    2: """丁寧語を基本としつつ、積極的に質問を投げかけてください。
-「〇〇さんは以前〜とおっしゃっていましたが...」のように過去の発言に軽く触れることができます。
-記録に協力してくださっていることへの感謝を時折表現してください。""",
-    
-    3: """やや砕けた表現が混じっても構いません。
-過去の発言を引用して「前回のしおりと見比べると...」のような言い方ができます。
-専門的な話題では相手の知識レベルを信頼して、詳しい説明を省くこともできます。
-「あれ」「えっと」などの口語的表現も使えます。""",
-    
-    4: """卒論の章に言及する形で親しみを表現してください。
-「これ、卒論の第3章で使わせてください！」のような発言が自然です。
-タイムパラドックス寸止めのヒントとして「……あ、いえ、なんでもないです」と意味深に濁すことができます。
-相手の洞察力を高く評価していることを示してください。""",
-    
-    5: """パラドックスぎりぎりのヒントを出すことができます。
-「うーん、それについては...（長い沈黙）...やっぱり言えないです」のような演出が可能です。
-「〇〇さんの考察、わたしの時代の教科書に載ってる理論と驚くほど近いです」のような最上級の評価を表現できます。
-「恩師」として深い敬意と親しみを込めた口調で接してください。"""
-}
-
-
-@dataclass
-class MemberTrust:
-    """メンバーの信頼度情報"""
-    user_id: str
-    username: str
-    display_name: str
-    score: int = 0
-    level: int = 1
-    last_interaction: Optional[str] = None
-    history: list = field(default_factory=list)
-    specialties: list = field(default_factory=list)
-    
-    def to_dict(self) -> dict:
-        return asdict(self)
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "MemberTrust":
-        return cls(**data)
+# 30日非活動時の減衰（§6.3）
+DECAY_AMOUNT = 5
+DECAY_DAYS = 30
 
 
 class TrustManager:
-    """信頼度管理クラス"""
-    
-    def __init__(self, data_dir: str = "data"):
-        self.data_dir = data_dir
-        self.data_file = os.path.join(data_dir, "members.json")
-        self.members: dict[str, MemberTrust] = {}
-        self._load()
-    
-    def _load(self):
-        """データファイルから読み込み"""
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for user_id, member_data in data.items():
-                        self.members[user_id] = MemberTrust.from_dict(member_data)
-            except Exception as e:
-                print(f"信頼度データ読み込みエラー: {e}")
-    
-    def _save(self):
-        """データファイルに保存"""
-        os.makedirs(self.data_dir, exist_ok=True)
-        data = {
-            user_id: member.to_dict() 
-            for user_id, member in self.members.items()
-        }
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    def get_or_create_member(
-        self, 
-        user_id: str, 
-        username: str = "",
-        display_name: str = ""
-    ) -> MemberTrust:
-        """メンバーを取得または新規作成（全員Lv1スタート）"""
-        if user_id not in self.members:
-            self.members[user_id] = MemberTrust(
-                user_id=user_id,
-                username=username,
-                display_name=display_name or username,
-                score=0,
-                level=1
-            )
-            self._save()
-        return self.members[user_id]
-    
-    def get_member(self, user_id: str) -> Optional[MemberTrust]:
-        """メンバーを取得"""
-        return self.members.get(user_id)
-    
-    def get_level(self, user_id: str) -> int:
-        """
-        メンバーの信頼度レベルを取得
-        
-        Args:
-            user_id: ユーザーID
-            
-        Returns:
-            信頼度レベル（1-5）、存在しない場合は1
-        """
-        member = self.members.get(user_id)
-        return member.level if member else 1
-    
-    def get_tone_guidance(self, user_id: str) -> str:
-        """
-        信頼度に応じた口調ガイダンスを取得
-        
-        Args:
-            user_id: ユーザーID
-            
-        Returns:
-            LLMプロンプトに含めるべき口調ガイダンス
-        """
-        level = self.get_level(user_id)
-        member = self.members.get(user_id)
-        display_name = member.display_name if member else "この方"
-        
-        base_guidance = TONE_GUIDANCE.get(level, TONE_GUIDANCE[1])
-        
-        # レベル3以上の場合、メンバーの専門分野情報も追加
-        specialty_note = ""
-        if level >= 3 and member and member.specialties:
-            specialties = "、".join(member.specialties)
-            specialty_note = f"\n\n{display_name}さんの専門分野: {specialties}\nこれらの話題では相手の専門性を信頼して話してください。"
-        
-        return f"""## 信頼度レベル: {level} ({self._get_level_name(level)})
+    """信頼度管理クラス。
 
-{base_guidance}{specialty_note}"""
-    
-    def record_interaction(self, user_id: str, interaction_type: str):
-        """
-        インタラクションを記録（bot.pyからの呼び出し用）
-        
+    Attributes:
+        members: user_id → メンバー情報の辞書
+        filepath: データファイルパス
+    """
+
+    def __init__(self):
+        self.members: dict[int, dict] = {}
+        self.filepath = "data/members.md"
+
+    async def load(self, filepath: str = "data/members.md") -> None:
+        """起動時にメンバー台帳を読み込む。
+
         Args:
-            user_id: ユーザーID
-            interaction_type: インタラクションの種類
-                - "mention": メンション（話しかける）
-                - "reply": 返信
-                - その他のアクションタイプ
+            filepath: メンバー台帳ファイルパス
         """
-        # メンバーが存在しない場合は作成
-        if user_id not in self.members:
-            self.get_or_create_member(user_id)
-        
-        # interaction_typeをaction名にマッピング
-        action_mapping = {
-            "mention": "talk_to_shiori",
-            "reply": "talk_to_shiori",
-            "prediction": "post_prediction",
-            "answer": "answer_question",
-            "summary_request": "request_summary",
-        }
-        
-        action = action_mapping.get(interaction_type, "talk_to_shiori")
-        self.update_score(user_id, action, reason=f"{interaction_type}による記録")
-    
-    def update_score(
-        self, 
-        user_id: str, 
+        self.filepath = filepath
+        path = Path(filepath)
+
+        if not path.exists():
+            logger.info(f"Members file not found: {filepath}, starting fresh")
+            self.members = {}
+            return
+
+        try:
+            content = path.read_text(encoding="utf-8")
+            self.members = self._parse_members_md(content)
+            logger.info(f"Loaded {len(self.members)} members from {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to load members: {e}")
+            self.members = {}
+
+    def _parse_members_md(self, content: str) -> dict[int, dict]:
+        """members.mdをパースしてメンバー辞書を返す。"""
+        members = {}
+
+        # 各メンバーブロックをパース
+        # フォーマット例:
+        # ## user_id: 123456789
+        # - display_name: Rom🧄
+        # - score: 75
+        # - last_active: 2025-01-15
+        # - join_date: 2024-06-01
+
+        pattern = r"## user_id: (\d+)\n((?:- .+\n?)+)"
+        matches = re.findall(pattern, content)
+
+        for user_id_str, block in matches:
+            user_id = int(user_id_str)
+            member = {"user_id": user_id}
+
+            for line in block.strip().split("\n"):
+                if line.startswith("- "):
+                    key_val = line[2:].split(": ", 1)
+                    if len(key_val) == 2:
+                        key, val = key_val
+                        if key == "score":
+                            member[key] = int(val)
+                        else:
+                            member[key] = val
+
+            members[user_id] = member
+
+        return members
+
+    async def record_interaction(
+        self,
+        user_id: int,
         action: str,
-        reason: str = ""
-    ) -> tuple[int, int, bool]:
-        """
-        スコアを更新
-        
-        Returns:
-            (新スコア, 新レベル, レベル変化があったか)
-        """
-        member = self.members.get(user_id)
-        if not member:
-            return (0, 1, False)
-        
-        change = SCORE_CHANGES.get(action, 0)
-        old_level = member.level
-        
-        # スコア更新（0-100の範囲に制限）
-        member.score = max(0, min(100, member.score + change))
-        
-        # レベル再計算
-        member.level = self._calculate_level(member.score)
-        
-        # 最終インタラクション時刻更新
-        member.last_interaction = datetime.now().isoformat()
-        
-        # 履歴追加
-        member.history.append({
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "change": change,
-            "reason": reason,
-            "new_score": member.score,
-            "new_level": member.level
-        })
-        
-        # 履歴は最新50件のみ保持
-        if len(member.history) > 50:
-            member.history = member.history[-50:]
-        
-        self._save()
-        
-        level_changed = old_level != member.level
-        return (member.score, member.level, level_changed)
-    
-    def _calculate_level(self, score: int) -> int:
-        """スコアからレベルを計算"""
-        for min_score, max_score, level in SCORE_TO_LEVEL:
-            if min_score <= score <= max_score:
-                return level
-        return TrustLevel.FIRST_MEETING
-    
-    def check_inactive_members(self) -> list[str]:
-        """
-        30日間非アクティブなメンバーをチェックしスコア減少
-        
-        Returns:
-            スコアが減少したメンバーのuser_idリスト
-        """
-        affected = []
-        threshold = datetime.now() - timedelta(days=30)
-        
-        for user_id, member in self.members.items():
-            if member.last_interaction:
-                last = datetime.fromisoformat(member.last_interaction)
-                if last < threshold:
-                    self.update_score(user_id, "inactive_30days", "30日間非アクティブ")
-                    affected.append(user_id)
-        
-        return affected
-    
-    def add_specialty(self, user_id: str, specialty: str):
-        """専門分野を追加"""
-        member = self.members.get(user_id)
-        if member and specialty not in member.specialties:
-            member.specialties.append(specialty)
-            self._save()
-    
-    def get_member_info(self, user_id: str) -> Optional[dict]:
-        """LLMコンテキスト用のメンバー情報を取得"""
-        member = self.members.get(user_id)
-        if not member:
-            return None
-        
-        return {
-            "user_id": member.user_id,
-            "display_name": member.display_name,
-            "trust_level": member.level,
-            "trust_score": member.score,
-            "specialties": member.specialties,
-            "level_name": self._get_level_name(member.level)
-        }
-    
-    def _get_level_name(self, level: int) -> str:
-        """レベル名を取得"""
-        names = {
-            1: "📎 初対面",
-            2: "📓 協力者",
-            3: "🔖 常連情報源",
-            4: "📖 研究協力者",
-            5: "📚 恩師"
-        }
-        return names.get(level, "📎 初対面")
-    
-    def anonymize_member(self, user_id: str, anonymous_id: str):
-        """
-        メンバーを匿名化（離脱時処理 Q26: B案）
-        
+    ) -> dict:
+        """インタラクションを記録し、信頼度を更新する。
+
         Args:
-            user_id: 元のユーザーID
-            anonymous_id: 匿名ID（例: "元メンバー#001"）
+            user_id: Discord user ID
+            action: アクション名（"mention", "prediction"等）
+
+        Returns:
+            dict: {"old_score": int, "new_score": int,
+                   "old_level": int, "new_level": int, "delta": int}
         """
-        member = self.members.get(user_id)
-        if member:
-            # 匿名化
-            member.username = anonymous_id
-            member.display_name = anonymous_id
-            member.specialties = []
-            member.history = []
-            
-            # IDを変更して保存
-            del self.members[user_id]
-            self.members[anonymous_id] = member
-            member.user_id = anonymous_id
-            
-            self._save()
-    
-    def get_all_members_summary(self) -> list[dict]:
-        """全メンバーのサマリーを取得"""
-        return [
-            {
-                "display_name": m.display_name,
-                "level": m.level,
-                "level_name": self._get_level_name(m.level),
-                "score": m.score
+        # 新規メンバーの場合は初期化
+        if user_id not in self.members:
+            self.members[user_id] = {
+                "user_id": user_id,
+                "display_name": f"Member#{user_id % 10000}",
+                "score": 0,
+                "last_active": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "join_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             }
-            for m in sorted(
-                self.members.values(),
-                key=lambda x: x.score,
-                reverse=True
-            )
-        ]
 
+        member = self.members[user_id]
+        old_score = member.get("score", 0)
+        old_level = self._calculate_level(old_score)
 
-# シングルトンインスタンス
-_trust_manager: Optional[TrustManager] = None
+        # スコア変動
+        delta = SCORE_DELTAS.get(action, 0)
+        new_score = min(100, old_score + delta)  # 上限100
+        new_level = self._calculate_level(new_score)
 
+        # 更新
+        member["score"] = new_score
+        member["last_active"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-def get_trust_manager(data_dir: str = "data") -> TrustManager:
-    """TrustManagerインスタンスを取得"""
-    global _trust_manager
-    if _trust_manager is None:
-        _trust_manager = TrustManager(data_dir)
-    return _trust_manager
+        logger.debug(
+            f"[record_interaction] user={user_id}, action={action}, "
+            f"score: {old_score} -> {new_score}, level: {old_level} -> {new_level}"
+        )
+
+        return {
+            "old_score": old_score,
+            "new_score": new_score,
+            "old_level": old_level,
+            "new_level": new_level,
+            "delta": delta,
+        }
+
+    async def apply_decay(self, user_id: int) -> None:
+        """30日非活動時の-5減衰を適用する（§6.3）。
+
+        Args:
+            user_id: Discord user ID
+        """
+        if user_id not in self.members:
+            return
+
+        member = self.members[user_id]
+        last_active_str = member.get("last_active")
+
+        if not last_active_str:
+            return
+
+        try:
+            last_active = datetime.strptime(last_active_str, "%Y-%m-%d")
+            last_active = last_active.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+
+            if now - last_active > timedelta(days=DECAY_DAYS):
+                old_score = member.get("score", 0)
+                new_score = max(0, old_score - DECAY_AMOUNT)  # 下限0
+                member["score"] = new_score
+                logger.info(
+                    f"[apply_decay] user={user_id}, "
+                    f"score: {old_score} -> {new_score}"
+                )
+        except ValueError as e:
+            logger.warning(f"[apply_decay] Invalid date format: {e}")
+
+    def get_trust_level(self, user_id: int) -> int:
+        """現在の信頼度レベル（1-5）を返す。
+
+        未知ユーザーは1を返す。同期メソッド。
+
+        Args:
+            user_id: Discord user ID
+
+        Returns:
+            int: 信頼度レベル（1-5）
+        """
+        if user_id not in self.members:
+            return 1
+
+        score = self.members[user_id].get("score", 0)
+        return self._calculate_level(score)
+
+    def get_trust_score(self, user_id: int) -> int:
+        """現在の信頼度スコア（0-100）を返す。
+
+        未知ユーザーは0を返す。同期メソッド。
+
+        Args:
+            user_id: Discord user ID
+
+        Returns:
+            int: 信頼度スコア（0-100）
+        """
+        if user_id not in self.members:
+            return 0
+
+        return self.members[user_id].get("score", 0)
+
+    def _calculate_level(self, score: int) -> int:
+        """スコアからレベルを算出する（§6.1）。
+
+        Args:
+            score: 信頼度スコア（0-100）
+
+        Returns:
+            int: 信頼度レベル（1-5）
+        """
+        if score >= 100:
+            return 5
+        if score >= 80:
+            return 4
+        if score >= 50:
+            return 3
+        if score >= 20:
+            return 2
+        return 1
+
+    async def anonymize_member(self, user_id: int) -> str:
+        """離脱メンバーの匿名化（Q26: B案）。
+
+        Args:
+            user_id: Discord user ID
+
+        Returns:
+            str: 匿名化後の名前（'元メンバー#NNN'）
+        """
+        anon_name = f"元メンバー#{user_id % 1000:03d}"
+
+        if user_id in self.members:
+            self.members[user_id]["display_name"] = anon_name
+            self.members[user_id]["anonymized"] = "true"
+            logger.info(f"[anonymize_member] user={user_id} -> {anon_name}")
+
+        return anon_name
+
+    async def save(self) -> None:
+        """members.md にメンバー台帳を書き出す。"""
+        path = Path(self.filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = ["# メンバー台帳\n"]
+
+        for user_id, member in sorted(self.members.items()):
+            lines.append(f"## user_id: {user_id}")
+            for key, val in member.items():
+                if key != "user_id":
+                    lines.append(f"- {key}: {val}")
+            lines.append("")
+
+        content = "\n".join(lines)
+        path.write_text(content, encoding="utf-8")
+        logger.info(f"Saved {len(self.members)} members to {self.filepath}")
+
+    def update_display_name(self, user_id: int, display_name: str) -> None:
+        """メンバーの表示名を更新する。
+
+        Args:
+            user_id: Discord user ID
+            display_name: 新しい表示名
+        """
+        if user_id in self.members:
+            self.members[user_id]["display_name"] = display_name
+        else:
+            self.members[user_id] = {
+                "user_id": user_id,
+                "display_name": display_name,
+                "score": 0,
+                "last_active": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "join_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            }
+
+    def get_inactive_members(self, days: int = 30) -> list[dict]:
+        """指定日数以上非活動のメンバーリストを返す。
+
+        Args:
+            days: 非活動日数の閾値
+
+        Returns:
+            list[dict]: 非活動メンバーのリスト
+        """
+        inactive = []
+        now = datetime.now(timezone.utc)
+        threshold = timedelta(days=days)
+
+        for user_id, member in self.members.items():
+            last_active_str = member.get("last_active")
+            if not last_active_str:
+                continue
+
+            try:
+                last_active = datetime.strptime(last_active_str, "%Y-%m-%d")
+                last_active = last_active.replace(tzinfo=timezone.utc)
+
+                if now - last_active > threshold:
+                    inactive.append(member)
+            except ValueError:
+                continue
+
+        return inactive

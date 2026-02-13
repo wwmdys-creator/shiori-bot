@@ -1,445 +1,394 @@
-"""
-predictions.py - 予測台帳モジュール
+"""predictions.py — 栞（Shiori）予測台帳モジュール
 
-栞（Shiori）Bot用の予測記録・検索・差分検出機能
-時間軸は範囲として記録（Q21: C案）
-差分指摘は範囲が重複しなくなったら（Q22: C案）
+全予測レコードの記録・検索・管理を行う。
+内部で T2（カテゴリ）、T3（時間軸）、T4（差分）を順に呼び出す。
+
+COMMON_MISTAKES §10: クラス名は PredictionLedger（PredictionManager ではない）。
+
+依存: llm.py, categories.py, timeline.py
+参照: interface_contract.md §2.4, data_schema.md §2, prompt_templates.md T4
 """
 
-import os
-import json
 import re
-from datetime import datetime
-from typing import Optional
-from dataclasses import dataclass, field, asdict
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from categories import CategoryManager
+from timeline import TimelineAnalyzer
 
-@dataclass
-class TimelineRange:
-    """時間軸の範囲"""
-    start: Optional[int] = None  # 開始年（不明ならNone）
-    end: Optional[int] = None    # 終了年（不明ならNone）
-    
-    def __str__(self) -> str:
-        start_str = str(self.start) if self.start else "?"
-        end_str = str(self.end) if self.end else "?"
-        return f"{start_str}-{end_str}年"
-    
-    def overlaps(self, other: "TimelineRange") -> bool:
-        """別の範囲と重複するか判定（Q22: C案）"""
-        # どちらかが完全に不明な場合は重複ありとみなす
-        if (self.start is None and self.end is None) or \
-           (other.start is None and other.end is None):
-            return True
-        
-        # 片方だけ不明な場合の処理
-        self_start = self.start or 1900
-        self_end = self.end or 2100
-        other_start = other.start or 1900
-        other_end = other.end or 2100
-        
-        # 重複判定
-        return not (self_end < other_start or other_end < self_start)
-    
-    def to_dict(self) -> dict:
-        return {"start": self.start, "end": self.end}
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "TimelineRange":
-        return cls(start=data.get("start"), end=data.get("end"))
-    
-    @classmethod
-    def parse(cls, text: str) -> "TimelineRange":
-        """
-        テキストから時間軸を解析（Q21: C案）
-        
-        Examples:
-            "2030年にAGI" → 2030-2030年
-            "2030年代半ば" → 2034-2036年
-            "2030〜2035年" → 2030-2035年
-            "2030年までに" → ?-2030年
-            "2030年以降" → 2030-?年
-        """
-        # 年号パターン
-        year_pattern = r'20[2-9]\d'
-        
-        # 範囲パターン（2030〜2035年、2030-2035年）
-        range_match = re.search(
-            rf'({year_pattern})\s*[〜～\-−]\s*({year_pattern})', 
-            text
-        )
-        if range_match:
-            return cls(
-                start=int(range_match.group(1)),
-                end=int(range_match.group(2))
-            )
-        
-        # 「〜年代半ば」パターン
-        mid_decade_match = re.search(rf'({year_pattern[:-1]})0年代半ば', text)
-        if mid_decade_match:
-            decade = int(mid_decade_match.group(1) + "0")
-            return cls(start=decade + 4, end=decade + 6)
-        
-        # 「〜年代前半」パターン
-        early_decade_match = re.search(rf'({year_pattern[:-1]})0年代前半', text)
-        if early_decade_match:
-            decade = int(early_decade_match.group(1) + "0")
-            return cls(start=decade, end=decade + 4)
-        
-        # 「〜年代後半」パターン
-        late_decade_match = re.search(rf'({year_pattern[:-1]})0年代後半', text)
-        if late_decade_match:
-            decade = int(late_decade_match.group(1) + "0")
-            return cls(start=decade + 5, end=decade + 9)
-        
-        # 「〜年代」パターン
-        decade_match = re.search(rf'({year_pattern[:-1]})0年代', text)
-        if decade_match:
-            decade = int(decade_match.group(1) + "0")
-            return cls(start=decade, end=decade + 9)
-        
-        # 「〜年までに」パターン
-        by_year_match = re.search(rf'({year_pattern})年まで', text)
-        if by_year_match:
-            return cls(start=None, end=int(by_year_match.group(1)))
-        
-        # 「〜年以降」パターン
-        after_year_match = re.search(rf'({year_pattern})年以降', text)
-        if after_year_match:
-            return cls(start=int(after_year_match.group(1)), end=None)
-        
-        # 単一年号パターン
-        single_match = re.search(rf'({year_pattern})年?', text)
-        if single_match:
-            year = int(single_match.group(1))
-            return cls(start=year, end=year)
-        
-        return cls()
+logger = logging.getLogger("shiori.predictions")
 
+JST = timezone(timedelta(hours=9))
 
-@dataclass
-class Prediction:
-    """予測レコード"""
-    id: int
-    user_id: str
-    username: str
-    content: str
-    category: str
-    timeline: TimelineRange
-    created_at: str
-    message_id: str
-    channel_id: str
-    related_prediction_id: Optional[int] = None
-    diff_note: Optional[str] = None
-    result: str = "未判定"  # 未判定 / 的中 / 外れ / 部分的中
-    result_note: Optional[str] = None
-    result_date: Optional[str] = None
-    
-    def to_dict(self) -> dict:
-        data = asdict(self)
-        data["timeline"] = self.timeline.to_dict()
-        return data
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "Prediction":
-        timeline_data = data.pop("timeline", {})
-        data["timeline"] = TimelineRange.from_dict(timeline_data)
-        return cls(**data)
-    
-    def format_record(self) -> str:
-        """フォーマットされた記録文字列を生成"""
-        lines = [
-            f"📎 予測記録 #{self.id:04d}",
-            f"投稿者: {self.username}さん / {self.created_at[:10]}",
-            f"内容: 「{self.content}」",
-            f"カテゴリ: {self.category}",
-            f"時間軸: {self.timeline}",
-        ]
-        
-        if self.related_prediction_id:
-            lines.append(f"前回関連予測: #{self.related_prediction_id:04d}（{self.diff_note}）")
-        
-        if self.result != "未判定":
-            result_emoji = {"的中": "✅", "外れ": "❌", "部分的中": "🔶"}.get(self.result, "")
-            lines.append(f"結果: {result_emoji} {self.result}")
-            if self.result_note:
-                lines.append(f"備考: {self.result_note}")
-        
-        return "\n".join(lines)
+# T4 システムプロンプト
+T4_SYSTEM_PROMPT = (
+    "あなたは予測変化分析アシスタントです。\n"
+    "同一人物が過去に行った予測と新しい予測を比較し、変化点を簡潔に要約します。\n"
+    "JSONのみを出力してください。説明文は不要です。"
+)
+
+# T4 ユーザープロンプトテンプレート
+T4_USER_TEMPLATE = """以下の2つの予測を比較し、変化点を要約してください。
+
+過去の予測:
+- 番号: {old_prediction_id}
+- 内容: {old_prediction_text}
+- カテゴリ: {old_category}
+- 時間軸: {old_timeline}
+- 投稿日: {old_date}
+
+新しい予測:
+- 内容: {new_prediction_text}
+- カテゴリ: {new_category}
+- 時間軸: {new_timeline}
+- 投稿日: {new_date}
+
+ルール:
+1. 変化の方向性を判定（前倒し/後ろ倒し/楽観化/悲観化/焦点変更/撤回）
+2. 差分の要約は20字以内
+3. 変化がない場合は is_changed: false
+
+以下のJSON形式で回答してください:
+{{"is_changed": true/false, "change_type": "前倒し|後ろ倒し|楽観化|悲観化|焦点変更|撤回", "diff_summary": "差分の要約（20字以内）"}}"""
 
 
 class PredictionLedger:
-    """予測台帳管理クラス"""
-    
-    def __init__(self, data_dir: str = "data"):
-        self.data_dir = data_dir
-        self.data_file = os.path.join(data_dir, "predictions.json")
-        self.predictions: list[Prediction] = []
-        self.next_id = 1
-        self._load()
-    
-    def _load(self):
-        """データファイルから読み込み"""
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.predictions = [
-                        Prediction.from_dict(p) for p in data.get("predictions", [])
-                    ]
-                    self.next_id = data.get("next_id", 1)
-            except Exception as e:
-                print(f"予測データ読み込みエラー: {e}")
-    
-    def _save(self):
-        """データファイルに保存"""
-        os.makedirs(self.data_dir, exist_ok=True)
-        data = {
-            "predictions": [p.to_dict() for p in self.predictions],
-            "next_id": self.next_id
-        }
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    
-    def add_prediction(
-        self,
-        user_id: str,
-        username: str,
-        content: str,
-        category: str,
-        timeline: TimelineRange,
-        message_id: str,
-        channel_id: str
-    ) -> tuple[Prediction, Optional[Prediction], Optional[str]]:
-        """
-        予測を追加
-        
-        Returns:
-            (新規予測, 関連する過去予測, 差分メモ)
-        """
-        # 関連する過去予測を検索
-        related, diff_note = self._find_related_prediction(
-            user_id, category, timeline
-        )
-        
-        prediction = Prediction(
-            id=self.next_id,
-            user_id=user_id,
-            username=username,
-            content=content,
-            category=category,
-            timeline=timeline,
-            created_at=datetime.now().isoformat(),
-            message_id=message_id,
-            channel_id=channel_id,
-            related_prediction_id=related.id if related else None,
-            diff_note=diff_note
-        )
-        
-        self.predictions.append(prediction)
-        self.next_id += 1
-        self._save()
-        
-        return (prediction, related, diff_note)
-    
-    def _find_related_prediction(
-        self,
-        user_id: str,
-        category: str,
-        new_timeline: TimelineRange
-    ) -> tuple[Optional[Prediction], Optional[str]]:
-        """
-        関連する過去予測を検索し、差分があれば指摘（Q22: C案）
-        """
-        # 同一ユーザー・同一カテゴリの最新予測を検索
-        related = None
-        for p in reversed(self.predictions):
-            if p.user_id == user_id and p.category == category:
-                related = p
-                break
-        
-        if not related:
-            return (None, None)
-        
-        # 時間軸の重複チェック
-        if not new_timeline.overlaps(related.timeline):
-            # 重複なし = 差分あり
-            if self._is_earlier(new_timeline, related.timeline):
-                diff_note = f"前倒し: {related.timeline} → {new_timeline}"
-            else:
-                diff_note = f"後退: {related.timeline} → {new_timeline}"
-            return (related, diff_note)
-        
-        return (related, None)
-    
-    def _is_earlier(
-        self, 
-        new: TimelineRange, 
-        old: TimelineRange
-    ) -> bool:
-        """新しい時間軸が古い時間軸より早いか判定"""
-        new_center = self._get_center(new)
-        old_center = self._get_center(old)
-        return new_center < old_center
-    
-    def _get_center(self, timeline: TimelineRange) -> float:
-        """時間軸の中心を取得"""
-        start = timeline.start or 2020
-        end = timeline.end or 2050
-        return (start + end) / 2
-    
-    def get_prediction(self, prediction_id: int) -> Optional[Prediction]:
-        """IDで予測を取得"""
-        for p in self.predictions:
-            if p.id == prediction_id:
-                return p
-        return None
-    
-    def get_user_predictions(
-        self, 
-        user_id: str,
-        limit: int = 10
-    ) -> list[Prediction]:
-        """ユーザーの予測を取得"""
-        user_preds = [p for p in self.predictions if p.user_id == user_id]
-        return sorted(user_preds, key=lambda x: x.created_at, reverse=True)[:limit]
-    
-    def get_category_predictions(
-        self,
-        category: str,
-        limit: int = 10
-    ) -> list[Prediction]:
-        """カテゴリ別の予測を取得"""
-        cat_preds = [p for p in self.predictions if category in p.category]
-        return sorted(cat_preds, key=lambda x: x.created_at, reverse=True)[:limit]
-    
-    def get_pending_judgments(self, user_id: str) -> list[Prediction]:
-        """
-        期限到来で未判定の予測を取得（Q27: C案）
-        """
-        current_year = datetime.now().year
-        pending = []
-        
-        for p in self.predictions:
-            if p.user_id != user_id:
-                continue
-            if p.result != "未判定":
-                continue
-            
-            # 終了年が今年以前なら期限到来
-            if p.timeline.end and p.timeline.end <= current_year:
-                pending.append(p)
-        
-        return pending
-    
-    def record_judgment(
-        self,
-        prediction_id: int,
-        result: str,
-        note: str = ""
-    ) -> Optional[Prediction]:
-        """
-        的中判定を記録（Q27: C案）
-        
+    """予測台帳クラス。
+
+    COMMON_MISTAKES §10: クラス名は PredictionLedger。
+
+    Attributes:
+        llm: LLMClient インスタンス
+        predictions: 予測レコードのリスト
+        categories: CategoryManager インスタンス
+        timeline: TimelineAnalyzer インスタンス
+    """
+
+    def __init__(self, llm):
+        self.llm = llm
+        self.predictions: list[dict] = []
+        self.categories = CategoryManager(llm)
+        self.timeline = TimelineAnalyzer(llm)
+
+    async def load(self, filepath: str = "data/predictions.md") -> None:
+        """起動時に予測台帳を読み込む。
+
+        内部で categories.md もロードする。
+
         Args:
-            prediction_id: 予測ID
-            result: 的中 / 外れ / 部分的中
-            note: 備考
+            filepath: predictions.md のパス
         """
-        prediction = self.get_prediction(prediction_id)
-        if not prediction:
+        # カテゴリマスタも読み込み
+        await self.categories.load()
+
+        path = Path(filepath)
+        if not path.exists():
+            logger.warning(f"File not found: {filepath}. Starting with empty prediction list.")
+            return
+
+        content = path.read_text(encoding="utf-8")
+        self._parse_predictions(content)
+        logger.info(f"PredictionLedger loaded: {len(self.predictions)} predictions")
+
+    def _parse_predictions(self, content: str) -> None:
+        """predictions.md をパースして予測リストを構築する。"""
+        sections = re.split(r'^## 予測 #', content, flags=re.MULTILINE)
+
+        for section in sections:
+            if not section.strip():
+                continue
+            prediction = self._parse_prediction_section(section)
+            if prediction:
+                self.predictions.append(prediction)
+
+    def _parse_prediction_section(self, section: str) -> dict | None:
+        """予測セクションをパースして辞書を返す。"""
+        lines = section.strip().split("\n")
+        if not lines:
             return None
-        
-        prediction.result = result
-        prediction.result_note = note
-        prediction.result_date = datetime.now().isoformat()
-        
-        self._save()
-        return prediction
-    
-    def search(
-        self,
-        query: str = "",
-        user_id: Optional[str] = None,
-        category: Optional[str] = None,
-        year: Optional[int] = None,
-        limit: int = 20
-    ) -> list[Prediction]:
-        """予測を検索"""
-        results = []
-        
-        for p in self.predictions:
-            # ユーザーフィルター
-            if user_id and p.user_id != user_id:
-                continue
-            
-            # カテゴリフィルター
-            if category and category not in p.category:
-                continue
-            
-            # 年フィルター
-            if year:
-                if p.timeline.start and p.timeline.start > year:
-                    continue
-                if p.timeline.end and p.timeline.end < year:
-                    continue
-            
-            # テキスト検索
-            if query and query.lower() not in p.content.lower():
-                continue
-            
-            results.append(p)
-        
-        return sorted(results, key=lambda x: x.created_at, reverse=True)[:limit]
-    
-    def get_statistics(self) -> dict:
-        """統計情報を取得"""
-        total = len(self.predictions)
-        by_result = {"未判定": 0, "的中": 0, "外れ": 0, "部分的中": 0}
-        by_category = {}
-        by_user = {}
-        
-        for p in self.predictions:
-            by_result[p.result] = by_result.get(p.result, 0) + 1
-            by_category[p.category] = by_category.get(p.category, 0) + 1
-            by_user[p.username] = by_user.get(p.username, 0) + 1
-        
-        return {
-            "total": total,
-            "by_result": by_result,
-            "by_category": dict(sorted(
-                by_category.items(), 
-                key=lambda x: x[1], 
-                reverse=True
-            )[:10]),
-            "by_user": dict(sorted(
-                by_user.items(),
-                key=lambda x: x[1],
-                reverse=True
-            )[:10]),
-            "accuracy_rate": (
-                by_result["的中"] / (by_result["的中"] + by_result["外れ"])
-                if (by_result["的中"] + by_result["外れ"]) > 0
-                else None
-            )
+
+        # 予測番号
+        id_match = re.match(r'^(\d{4})', lines[0])
+        if not id_match:
+            return None
+
+        prediction: dict = {
+            "id": f"#{id_match.group(1)}",
         }
-    
-    def anonymize_user(self, user_id: str, anonymous_id: str):
-        """ユーザーの予測を匿名化（Q26: B案）"""
+
+        for line in lines:
+            line = line.strip()
+            match = re.match(r'^- \*\*(.+?):\*\*\s*(.+)$', line)
+            if match:
+                key = match.group(1).strip()
+                value = match.group(2).strip()
+
+                field_map = {
+                    "投稿者": "author",
+                    "投稿日時": "timestamp",
+                    "チャンネル": "channel",
+                    "内容": "content",
+                    "カテゴリ": "category",
+                    "時間軸": "timeline",
+                    "検出方法": "detection_method",
+                    "前回関連予測": "related_prediction",
+                    "備考": "notes",
+                }
+
+                if key in field_map:
+                    mapped_key = field_map[key]
+                    prediction[mapped_key] = value
+
+                    # 投稿者から user_id を抽出
+                    if key == "投稿者":
+                        uid_match = re.search(r'user_id:\s*(\d+)', value)
+                        if uid_match:
+                            prediction["user_id"] = int(uid_match.group(1))
+                        # 表示名を抽出
+                        name_match = re.match(r'^(.+?)さん', value)
+                        if name_match:
+                            prediction["display_name"] = name_match.group(1)
+
+                    # 時間軸から start/end を抽出
+                    if key == "時間軸":
+                        tl_match = re.match(r'(\d{4}|\?)-(\d{4}|\?)年?', value)
+                        if tl_match:
+                            prediction["timeline_start"] = tl_match.group(1)
+                            prediction["timeline_end"] = tl_match.group(2)
+
+        return prediction if prediction.get("id") else None
+
+    async def record_prediction(
+        self,
+        message: dict,
+        prediction_text: str,
+        detection_method: str,
+    ) -> dict:
+        """新規予測を記録する。
+
+        内部で T2（カテゴリ）、T3（時間軸）、T4（差分）を順に呼び出す。
+
+        Args:
+            message: {"user_id": int, "display_name": str,
+                      "content": str, "timestamp": str, "channel": str}
+            prediction_text: T1出力の prediction_text
+            detection_method: "mention" | "passive" | "reply"
+
+        Returns:
+            dict: 記録された予測レコード
+        """
+        import asyncio
+
+        prediction_id = self.get_next_prediction_id()
+        user_id = message["user_id"]
+        display_name = message["display_name"]
+
+        # T2（カテゴリ）と T3（時間軸）を並列実行
+        t2_task = self.categories.classify(prediction_text, display_name)
+        t3_task = self.timeline.extract(prediction_text, message["content"])
+        t2_result, t3_result = await asyncio.gather(t2_task, t3_task)
+
+        category = t2_result["categories"][0] if t2_result["categories"] else "未分類 / その他"
+
+        # T4（差分検出）: 同一ユーザー・同一カテゴリの過去予測を検索
+        related_prediction_str = "なし"
+        past_predictions = await self.find_by_user_and_category(user_id, category)
+
+        if past_predictions:
+            latest_past = past_predictions[-1]
+            old_start = latest_past.get("timeline_start", "?")
+            old_end = latest_past.get("timeline_end", "?")
+            new_start = t3_result.get("timeline_start", "?")
+            new_end = t3_result.get("timeline_end", "?")
+
+            # 時間軸が重複しない場合のみ差分を検出
+            if not TimelineAnalyzer.timelines_overlap(old_start, old_end, new_start, new_end):
+                t4_result = await self.llm.call_template(
+                    template_name="T4",
+                    system=T4_SYSTEM_PROMPT,
+                    user=T4_USER_TEMPLATE.format(
+                        old_prediction_id=latest_past.get("id", "?"),
+                        old_prediction_text=latest_past.get("content", ""),
+                        old_category=latest_past.get("category", ""),
+                        old_timeline=latest_past.get("timeline", ""),
+                        old_date=latest_past.get("timestamp", ""),
+                        new_prediction_text=prediction_text,
+                        new_category=category,
+                        new_timeline=t3_result.get("timeline_display", "?-?年"),
+                        new_date=message.get("timestamp", ""),
+                    ),
+                    max_tokens=200,
+                    temperature=0.3,
+                )
+
+                if t4_result and t4_result.get("is_changed"):
+                    diff_summary = t4_result.get("diff_summary", "変化あり")
+                    related_prediction_str = (
+                        f"{latest_past.get('id', '?')}（差分: {diff_summary}）"
+                    )
+
+        # 予測レコード構築
+        record = {
+            "id": prediction_id,
+            "user_id": user_id,
+            "display_name": display_name,
+            "author": f"{display_name}さん (user_id: {user_id})",
+            "timestamp": message.get("timestamp", datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")),
+            "channel": message.get("channel", ""),
+            "content": prediction_text,
+            "category": category,
+            "timeline": t3_result.get("timeline_display", "?-?年"),
+            "timeline_start": t3_result.get("timeline_start", "?"),
+            "timeline_end": t3_result.get("timeline_end", "?"),
+            "detection_method": detection_method,
+            "related_prediction": related_prediction_str,
+            "notes": "なし",
+        }
+
+        self.predictions.append(record)
+        await self.save()
+
+        logger.info(
+            f"Recorded prediction {prediction_id}: "
+            f"user={display_name}, category={category}, "
+            f"timeline={t3_result.get('timeline_display', '?')}"
+        )
+
+        return record
+
+    async def find_by_user_and_category(
+        self,
+        user_id: int,
+        category: str,
+    ) -> list[dict]:
+        """差分指摘用: 同一ユーザー・同一カテゴリの過去予測を検索する。
+
+        Args:
+            user_id: Discord ユーザーID
+            category: カテゴリ文字列
+
+        Returns:
+            list[dict]: 該当する予測レコードのリスト（時系列順）
+        """
+        from categories import normalize_category
+
+        norm_cat = normalize_category(category)
+        results = [
+            p for p in self.predictions
+            if p.get("user_id") == user_id
+            and normalize_category(p.get("category", "")) == norm_cat
+        ]
+        return results
+
+    def get_next_prediction_id(self) -> str:
+        """次の予測番号を返す（'#0001'形式）。
+
+        Returns:
+            str: 次の予測番号
+        """
+        if not self.predictions:
+            return "#0001"
+
+        all_nums = []
         for p in self.predictions:
-            if p.user_id == user_id:
-                p.user_id = anonymous_id
-                p.username = anonymous_id
-        self._save()
+            pid = p.get("id", "")
+            num_match = re.match(r'#(\d+)', pid)
+            if num_match:
+                all_nums.append(int(num_match.group(1)))
 
+        if not all_nums:
+            return "#0001"
 
-# シングルトンインスタンス
-_prediction_ledger: Optional[PredictionLedger] = None
+        return f"#{max(all_nums) + 1:04d}"
 
+    def format_prediction_record(self, prediction: dict) -> str:
+        """予測レコードをMarkdown形式の文字列に変換する。
 
-def get_prediction_ledger(data_dir: str = "data") -> PredictionLedger:
-    """PredictionLedgerインスタンスを取得"""
-    global _prediction_ledger
-    if _prediction_ledger is None:
-        _prediction_ledger = PredictionLedger(data_dir)
-    return _prediction_ledger
+        Args:
+            prediction: 予測レコード辞書
+
+        Returns:
+            str: Markdown形式の文字列
+        """
+        lines = [
+            f"## 予測 {prediction.get('id', '#????')}",
+            "",
+            f"- **投稿者:** {prediction.get('author', '不明')}",
+            f"- **投稿日時:** {prediction.get('timestamp', '')}",
+            f"- **チャンネル:** {prediction.get('channel', '')}",
+            f"- **内容:** 「{prediction.get('content', '')}」",
+            f"- **カテゴリ:** {prediction.get('category', '未分類')}",
+            f"- **時間軸:** {prediction.get('timeline', '?-?年')}",
+            f"- **検出方法:** {prediction.get('detection_method', 'unknown')}",
+            f"- **前回関連予測:** {prediction.get('related_prediction', 'なし')}",
+            f"- **備考:** {prediction.get('notes', 'なし')}",
+            "",
+        ]
+        return "\n".join(lines)
+
+    async def save(self) -> None:
+        """predictions.md と index.md に書き出す。"""
+        filepath = Path("data/predictions.md")
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = ["# 予測台帳\n\n"]
+        for prediction in self.predictions:
+            lines.append(self.format_prediction_record(prediction))
+            lines.append("\n---\n\n")
+
+        filepath.write_text("".join(lines), encoding="utf-8")
+
+        # index.md も更新
+        await self._update_index()
+
+        logger.debug(f"Saved {len(self.predictions)} predictions to {filepath}")
+
+    async def _update_index(self) -> None:
+        """index.md を再構築する。"""
+        filepath = Path("data/index.md")
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        lines = ["# 横断インデックス\n\n"]
+
+        # メンバー別インデックス
+        lines.append("## メンバー別インデックス\n\n")
+        by_user: dict[str, list[dict]] = {}
+        for p in self.predictions:
+            name = p.get("display_name", "不明")
+            uid = p.get("user_id", 0)
+            key = f"{name} (user_id: {uid})"
+            by_user.setdefault(key, []).append(p)
+
+        for user_key, preds in sorted(by_user.items()):
+            lines.append(f"### {user_key}\n\n")
+            lines.append("| 予測番号 | カテゴリ | 時間軸 | 投稿日 |\n")
+            lines.append("|---------|--------|--------|--------|\n")
+            for p in preds:
+                pid = p.get("id", "")
+                cat = p.get("category", "")
+                tl = p.get("timeline", "")
+                ts = p.get("timestamp", "")[:10]
+                lines.append(f"| {pid} | {cat} | {tl} | {ts} |\n")
+            lines.append("\n")
+
+        # カテゴリ別インデックス
+        lines.append("---\n\n## カテゴリ別インデックス\n\n")
+        by_cat: dict[str, list[dict]] = {}
+        for p in self.predictions:
+            cat = p.get("category", "未分類")
+            by_cat.setdefault(cat, []).append(p)
+
+        for cat_key, preds in sorted(by_cat.items()):
+            lines.append(f"### {cat_key}\n\n")
+            lines.append("| 予測番号 | 投稿者 | 時間軸 | 投稿日 |\n")
+            lines.append("|---------|--------|--------|--------|\n")
+            for p in preds:
+                pid = p.get("id", "")
+                name = p.get("display_name", "不明")
+                tl = p.get("timeline", "")
+                ts = p.get("timestamp", "")[:10]
+                lines.append(f"| {pid} | {name} | {tl} | {ts} |\n")
+            lines.append("\n")
+
+        filepath.write_text("".join(lines), encoding="utf-8")

@@ -1,193 +1,127 @@
-"""
-rate_limiter.py - レート制限モジュール
+"""rate_limiter.py — 栞（Shiori）レート制限モジュール
 
-Q17: B案 - チャンネルごとに5秒のクールダウン
-連続メンションへの対応を制御
+チャンネルごとのクールダウンを管理し、過剰応答を防ぐ。
+
+参照: interface_contract.md §2.11
 """
 
-import asyncio
-from datetime import datetime, timedelta
-from typing import Optional
-import os
+import logging
+import time
+
+logger = logging.getLogger("shiori.rate_limiter")
+
+# デフォルトのクールダウン秒数
+DEFAULT_COOLDOWN_SECONDS = 30
 
 
 class RateLimiter:
+    """レート制限管理クラス。
+
+    Attributes:
+        cooldown_seconds: クールダウン秒数
+        _last_response: チャンネルID → 最終応答タイムスタンプ
     """
-    チャンネルごとのレート制限
-    
-    同一チャンネルで連続してメンションされた場合、
-    クールダウン期間中は応答を控える
-    """
-    
-    def __init__(self, cooldown_seconds: int = 5):
-        """
+
+    def __init__(self, cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS):
+        """初期化。
+
         Args:
             cooldown_seconds: クールダウン秒数（デフォルト30秒）
         """
         self.cooldown_seconds = cooldown_seconds
-        self._last_response: dict[int, datetime] = {}  # channel_id -> last response time
-        self._lock = asyncio.Lock()
-    
-    async def check_rate_limit(self, channel_id: int) -> tuple[bool, Optional[int]]:
-        """
-        レート制限をチェック
-        
+        self._last_response: dict[int, float] = {}
+        logger.info(
+            f"RateLimiter initialized with cooldown={cooldown_seconds}s"
+        )
+
+    def can_respond(self, channel_id: int) -> bool:
+        """クールダウン期間が過ぎていればTrueを返す。
+
+        同期メソッド。
+
         Args:
-            channel_id: チャンネルID
-        
+            channel_id: Discord channel ID
+
         Returns:
-            tuple[bool, Optional[int]]: 
-                (応答可能か, 残り待機秒数)
-                応答可能ならTrue, None
-                制限中ならFalse, 残り秒数
+            bool: 応答可能ならTrue
         """
-        async with self._lock:
-            now = datetime.now()
-            
-            if channel_id not in self._last_response:
-                return True, None
-            
-            last_time = self._last_response[channel_id]
-            elapsed = (now - last_time).total_seconds()
-            
-            if elapsed >= self.cooldown_seconds:
-                return True, None
-            
-            remaining = int(self.cooldown_seconds - elapsed)
-            return False, remaining
-    
-    async def record_response(self, channel_id: int) -> None:
-        """
-        応答を記録
-        
+        if channel_id not in self._last_response:
+            return True
+
+        elapsed = time.time() - self._last_response[channel_id]
+        can = elapsed >= self.cooldown_seconds
+
+        if not can:
+            remaining = self.cooldown_seconds - elapsed
+            logger.debug(
+                f"[can_respond] channel={channel_id} "
+                f"cooldown remaining: {remaining:.1f}s"
+            )
+
+        return can
+
+    def record_response(self, channel_id: int) -> None:
+        """応答したことを記録する。
+
+        同期メソッド。
+
         Args:
-            channel_id: チャンネルID
+            channel_id: Discord channel ID
         """
-        async with self._lock:
-            self._last_response[channel_id] = datetime.now()
-    
-    async def acquire(self, channel_id: int) -> tuple[bool, Optional[int]]:
-        """
-        レート制限を取得（チェック＆記録を一度に行う）
-        
-        応答可能な場合は自動的に記録も行う
-        
+        self._last_response[channel_id] = time.time()
+        logger.debug(f"[record_response] channel={channel_id}")
+
+    def get_remaining_cooldown(self, channel_id: int) -> float:
+        """残りクールダウン時間を秒で返す。
+
         Args:
-            channel_id: チャンネルID
-        
+            channel_id: Discord channel ID
+
         Returns:
-            tuple[bool, Optional[int]]: 
-                (取得成功か, 残り待機秒数)
+            float: 残り秒数（0以上）
         """
-        can_respond, remaining = await self.check_rate_limit(channel_id)
-        
-        if can_respond:
-            await self.record_response(channel_id)
-        
-        return can_respond, remaining
-    
-    def get_cooldown_message(self, remaining_seconds: int) -> str:
-        """
-        クールダウン中のキャラクター口調メッセージを取得
-        
+        if channel_id not in self._last_response:
+            return 0.0
+
+        elapsed = time.time() - self._last_response[channel_id]
+        remaining = self.cooldown_seconds - elapsed
+        return max(0.0, remaining)
+
+    def reset(self, channel_id: int) -> None:
+        """特定チャンネルのクールダウンをリセットする。
+
         Args:
-            remaining_seconds: 残り秒数
-        
-        Returns:
-            メッセージ
+            channel_id: Discord channel ID
         """
-        if remaining_seconds <= 5:
-            return f"あっ、少しお待ちください……📎 あと{remaining_seconds}秒で応答できます"
-        elif remaining_seconds <= 15:
-            return f"すみません、まだノートを整理中です……📎 あと{remaining_seconds}秒お待ちください"
-        else:
-            return f"ごめんなさい、前の処理がまだ終わっていなくて……📎💦 あと{remaining_seconds}秒お待ちください"
-    
-    async def clear_channel(self, channel_id: int) -> None:
-        """
-        特定チャンネルのレート制限をクリア（管理用）
-        
+        if channel_id in self._last_response:
+            del self._last_response[channel_id]
+            logger.debug(f"[reset] channel={channel_id}")
+
+    def reset_all(self) -> None:
+        """全チャンネルのクールダウンをリセットする。"""
+        self._last_response.clear()
+        logger.info("[reset_all] All cooldowns cleared")
+
+    def set_cooldown(self, seconds: int) -> None:
+        """クールダウン秒数を変更する。
+
         Args:
-            channel_id: チャンネルID
+            seconds: 新しいクールダウン秒数
         """
-        async with self._lock:
-            if channel_id in self._last_response:
-                del self._last_response[channel_id]
-    
-    async def clear_all(self) -> None:
-        """全チャンネルのレート制限をクリア（管理用）"""
-        async with self._lock:
-            self._last_response.clear()
-    
-    def get_stats(self) -> dict:
-        """レート制限の統計情報を取得"""
-        now = datetime.now()
-        active_channels = 0
-        
-        for channel_id, last_time in self._last_response.items():
-            elapsed = (now - last_time).total_seconds()
-            if elapsed < self.cooldown_seconds:
-                active_channels += 1
-        
-        return {
-            "tracked_channels": len(self._last_response),
-            "active_cooldowns": active_channels,
-            "cooldown_seconds": self.cooldown_seconds
-        }
+        old = self.cooldown_seconds
+        self.cooldown_seconds = max(0, seconds)
+        logger.info(f"[set_cooldown] {old}s -> {self.cooldown_seconds}s")
 
+    def bypass_once(self, channel_id: int) -> None:
+        """次回の応答時にクールダウンをバイパスする。
 
-# シングルトンインスタンス
-_rate_limiter: Optional[RateLimiter] = None
+        メンション応答など、クールダウンに関係なく応答すべき場合に使用。
 
-
-def get_rate_limiter(cooldown_seconds: Optional[int] = None) -> RateLimiter:
-    """
-    RateLimiterのシングルトンインスタンスを取得
-    
-    Args:
-        cooldown_seconds: クールダウン秒数（初回のみ有効）
-    """
-    global _rate_limiter
-    
-    if _rate_limiter is None:
-        # 環境変数から読み込み、なければデフォルト30秒
-        seconds = cooldown_seconds or int(os.getenv("RATE_LIMIT_SECONDS", "30"))
-        _rate_limiter = RateLimiter(seconds)
-    
-    return _rate_limiter
-
-
-class UserRateLimiter:
-    """
-    ユーザーごとのレート制限（オプション）
-    
-    同一ユーザーからの連続メンションを制御
-    チャンネルレート制限とは別に使用可能
-    """
-    
-    def __init__(self, cooldown_seconds: int = 10):
-        self.cooldown_seconds = cooldown_seconds
-        self._last_request: dict[int, datetime] = {}  # user_id -> last request time
-        self._lock = asyncio.Lock()
-    
-    async def check_rate_limit(self, user_id: int) -> tuple[bool, Optional[int]]:
-        """ユーザーのレート制限をチェック"""
-        async with self._lock:
-            now = datetime.now()
-            
-            if user_id not in self._last_request:
-                return True, None
-            
-            last_time = self._last_request[user_id]
-            elapsed = (now - last_time).total_seconds()
-            
-            if elapsed >= self.cooldown_seconds:
-                return True, None
-            
-            remaining = int(self.cooldown_seconds - elapsed)
-            return False, remaining
-    
-    async def record_request(self, user_id: int) -> None:
-        """ユーザーのリクエストを記録"""
-        async with self._lock:
-            self._last_request[user_id] = datetime.now()
+        Args:
+            channel_id: Discord channel ID
+        """
+        # クールダウンを過去に設定することでバイパス
+        self._last_response[channel_id] = (
+            time.time() - self.cooldown_seconds - 1
+        )
+        logger.debug(f"[bypass_once] channel={channel_id}")
