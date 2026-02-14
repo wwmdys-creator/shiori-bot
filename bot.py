@@ -103,7 +103,7 @@ class ShioriBot(discord.Client):
 
         # 1. 依存なしモジュール
         self.channel_config = ChannelConfig()
-        self.rate_limiter = RateLimiter(cooldown_seconds=30)
+        self.rate_limiter = RateLimiter(cooldown_seconds=5)
         self.member_profile = MemberProfileManager()
         self.trust = TrustManager()
         self.reactions = ReactionManager()
@@ -276,11 +276,7 @@ class ShioriBot(discord.Client):
         community_knowledge = self.member_profile.get_community_knowledge_text(
             compact=True
         )
-        # デバッグログ
-        logger.info(f"Community knowledge length: {len(community_knowledge) if community_knowledge else 0}")
         if community_knowledge:
-            preview = community_knowledge[:500].replace('\n', ' ')
-            logger.info(f"Community knowledge preview: {preview}...")
             extra_context["community_knowledge"] = community_knowledge
 
         # ─── STEP 5: 予測検出（T1）
@@ -347,31 +343,34 @@ class ShioriBot(discord.Client):
         # STEP 9: システムプロンプト構築
         trust_level = self.trust.get_trust_level(user_id)
         
-        # メンバーに関する質問かどうか判定し、該当メンバー情報を抽出
-        member_query_info = self._extract_member_query_info(message.content)
-        if member_query_info:
-            logger.info(f"Member query detected: {member_query_info}")
+        # §6.6 コミュニティ知識応答のため、全メンバー情報を取得
+        community_knowledge_text = self.member_profile.get_community_knowledge_text(
+            compact=False  # 全情報を含める
+        )
+        
+        # STEP 9.5: メンバー質問の検出とハイライト
+        # ユーザーのメッセージからメンバー名を抽出し、該当プロファイルをハイライト
+        queried_member_highlight = self._extract_and_highlight_queried_member(
+            message.content, community_knowledge_text
+        )
+        
+        # DEBUG: ハイライトされたメンバー情報をログ出力
+        if queried_member_highlight:
+            logger.info(f"[DEBUG] Queried member highlight: {queried_member_highlight[:100]}...")
         
         system_prompt = self.llm.build_system_prompt(
             trust_level=trust_level,
             member_profile=profile,
             channel_overrides=overrides,
-            community_knowledge=community_knowledge,
-            member_query_info=member_query_info,  # 追加
+            community_knowledge_text=community_knowledge_text,
         )
         
-        # デバッグ: システムプロンプトに橋が含まれているか確認
-        if "橋" in system_prompt:
-            logger.info("System prompt contains 橋 ✓")
-        else:
-            logger.warning("System prompt does NOT contain 橋 ✗")
-        logger.info(f"System prompt length: {len(system_prompt)}")
+        # ハイライトされたメンバー情報をシステムプロンプトの先頭に追加
+        if queried_member_highlight:
+            system_prompt = queried_member_highlight + "\n\n" + system_prompt
         
-        # デバッグ: §11の新しい説明が含まれているか確認
-        if "メンバーについて質問されたら" in system_prompt:
-            logger.info("System prompt has new §11 instructions ✓")
-        else:
-            logger.warning("System prompt is MISSING new §11 instructions ✗")
+        # DEBUG: システムプロンプトの長さをログ出力
+        logger.info(f"[DEBUG] Final system_prompt length: {len(system_prompt)}")
 
         # 動的コンテキスト注入
         if prediction_context:
@@ -409,6 +408,12 @@ class ShioriBot(discord.Client):
             max_tokens=500,
             temperature=0.7,
         )
+
+        # STEP 11.5: 名前プレフィックスの除去
+        # LLMが「Shiori: 」「栞: 」などを付けてしまう場合がある
+        response_text = re.sub(r'^(Shiori:\s*)+', '', response_text, flags=re.IGNORECASE)
+        response_text = re.sub(r'^(栞:\s*)+', '', response_text)
+        response_text = response_text.strip()
 
         # STEP 12: 応答送信
         await message.channel.send(response_text)
@@ -568,70 +573,74 @@ class ShioriBot(discord.Client):
                 keywords.add(cat)
         return list(keywords)[:10]
 
-    def _extract_member_query_info(self, content: str) -> str | None:
-        """メンバーに関する質問から該当メンバー情報を抽出する。
+    def _extract_and_highlight_queried_member(
+        self,
+        message_content: str,
+        community_knowledge_text: str,
+    ) -> str | None:
+        """メッセージからメンバー名を抽出し、該当プロファイルをハイライトする。
+        
+        「〇〇さんについて」「〇〇って誰」等のパターンを検出し、
+        該当メンバーの情報をシステムプロンプトの先頭に配置するためのテキストを生成。
         
         Args:
-            content: ユーザーのメッセージ
+            message_content: ユーザーのメッセージ
+            community_knowledge_text: コミュニティ知識テキスト（未使用、互換性のため残す）
             
         Returns:
-            str | None: 該当メンバーの情報テキスト、または None
+            str | None: ハイライトテキスト。該当なしの場合はNone。
         """
-        import re
+        # メンション記法を除去してからパターンマッチ
+        clean_content = re.sub(r'<@!?\d+>\s*', '', message_content).strip()
+        logger.info(f"[DEBUG] Clean message content: '{clean_content}'")
         
-        logger.info(f"_extract_member_query_info called with: '{content}'")
-        
-        # @Shiori等のメンションを除去
-        content_clean = re.sub(r"<@!?\d+>\s*", "", content).strip()  # Discord形式のメンション
-        content_clean = re.sub(r"@\S+\s*", "", content_clean).strip()  # テキスト形式のメンション
-        
-        logger.info(f"Content after cleaning: '{content_clean}'")
-        
-        # メンバー質問パターン（より多くのパターンに対応）
+        # メンバー質問パターン（優先順位順）
         patterns = [
-            r"(.+?)さん(?:って|は|の|について)",  # 〇〇さんって/は/の/について
-            r"(.+?)さん(?:わかる|わかり|知ってる|知って)",  # 〇〇さんわかる？/知ってる？
-            r"(.+?)(?:って|は)(?:どんな人|誰|だれ)",  # 〇〇ってどんな人
-            r"(.+?)(?:の情報|について教えて|知ってる)",  # 〇〇の情報
-            r"(.+?)さん",  # 最後の手段：〇〇さん（任意の文脈）
+            # "〇〇さんについて教えて" "〇〇さんについておしえて"
+            r'([^\s]+?)さん(?:について|って|の(?:印象|こと))(?:教えて|おしえて)?',
+            # "〇〇について教えて"
+            r'([^\s]+?)(?:について|って誰|とは|ってどんな)(?:教えて|おしえて)?',
         ]
         
-        for i, pattern in enumerate(patterns):
-            match = re.search(pattern, content_clean)
+        queried_name = None
+        for pattern in patterns:
+            match = re.search(pattern, clean_content)
             if match:
-                query_name = match.group(1).strip()
-                logger.info(f"Pattern {i} matched, query_name: '{query_name}'")
-                
-                # メンバー検索
-                results = self.member_profile.search_member(query_name)
-                logger.info(f"Search results for '{query_name}': {len(results)} found")
-                
-                if results:
-                    # 最初のマッチを返す
-                    member = results[0]
-                    info_lines = [f"【質問されているメンバー: {member.get('display_name', query_name)}】"]
-                    
-                    if member.get("tier"):
-                        info_lines.append(f"Tier: {member['tier']}")
-                    if member.get("ポジション"):
-                        info_lines.append(f"役割: {member['ポジション']}")
-                    if member.get("関心領域"):
-                        info_lines.append(f"関心領域: {member['関心領域']}")
-                    if member.get("思想的特徴"):
-                        info_lines.append(f"思想的特徴: {member['思想的特徴']}")
-                    if member.get("発言スタイル"):
-                        info_lines.append(f"発言スタイル: {member['発言スタイル']}")
-                    if member.get("備考"):
-                        info_lines.append(f"備考: {member['備考']}")
-                    
-                    info = "\n".join(info_lines)
-                    logger.info(f"Returning member info: {info[:150]}...")
-                    return info
-                else:
-                    logger.info(f"No member found for query: '{query_name}'")
+                queried_name = match.group(1).strip()
+                break
         
-        logger.info("No member query pattern matched")
-        return None
+        if not queried_name:
+            logger.info("[DEBUG] No member name pattern detected")
+            return None
+        
+        logger.info(f"[DEBUG] Detected queried member name: '{queried_name}'")
+        
+        # member_profile.py のメソッドを使って検索
+        member_summary = self.member_profile.get_member_summary_for_highlight(queried_name)
+        
+        if not member_summary:
+            logger.info(f"[DEBUG] Member '{queried_name}' not found in profiles")
+            return None
+        
+        logger.info(f"[DEBUG] Found member summary for '{queried_name}'")
+        
+        # ハイライトテキストを生成
+        highlight = f"""
+================================================================
+【質問されたメンバー情報 - 必ずこの情報を使って回答すること】
+================================================================
+
+{member_summary}
+
+【応答ルール - 厳守】
+✅ 上記の情報を「フィールドノートによると……」として紹介する
+✅ 「わたしの印象では……」として紹介してもよい
+❌ 「記録が薄い」「把握できていない」は絶対禁止
+❌ 「教えていただけますか？」と聞き返すのは絶対禁止
+
+================================================================
+"""
+        return highlight
 
     # ─── バックグラウンドタスク ────────────────────────────
 
