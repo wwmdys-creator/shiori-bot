@@ -7,7 +7,7 @@ import os
 
 # ── LLMモデル ──
 MAIN_MODEL = os.getenv("MAIN_MODEL", "claude-sonnet-4-20250514")
-TIER1_MODEL = os.getenv("TIER1_MODEL", "claude-haiku-4-5-20250901")
+TIER1_MODEL = os.getenv("TIER1_MODEL", "claude-haiku-4-5-20251001")
 
 # ── Haiku制限 ──
 HAIKU_MAX_MESSAGE_CHARS = int(os.getenv("HAIKU_MAX_INPUT_CHARS", "500"))
