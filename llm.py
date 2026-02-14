@@ -327,7 +327,7 @@ class LLMClient:
     def format_discussion_summary(t7_result: dict) -> str:
         """T7（議論要約）の出力を栞のDiscord応答形式にフォーマットする。
 
-        prompt_templates.md §T7 のフォーマット変換仕様に準拠。
+        散文形式で出力する。箇条書きにはしない。
 
         Args:
             t7_result: call_template("T7", ...) の戻り値
@@ -339,15 +339,38 @@ class LLMClient:
         positions = t7_result.get("positions", [])
         unresolved = t7_result.get("unresolved", [])
 
-        lines = [f"📓 議論まとめ", f"論題: {topic}", ""]
-        for p in positions:
-            member = p.get("member", "?")
-            position = p.get("position", "")
-            lines.append(f"{member}説: {position}")
+        # 冒頭
+        text = f"📓 議論まとめ\n{topic}について。"
+
+        # 各メンバーの立場を散文で接続
+        if positions:
+            position_parts: list[str] = []
+            for i, p in enumerate(positions):
+                member = p.get("member", "?")
+                pos = p.get("position", "")
+                if i == 0:
+                    position_parts.append(f"{member}さんは{pos}")
+                elif i == len(positions) - 1:
+                    position_parts.append(f"{member}さんは{pos}")
+                else:
+                    position_parts.append(f"{member}さんは{pos}")
+
+            # 接続詞で繋ぐ
+            connectors = ["", "一方、", "また、", "さらに、", "加えて、"]
+            joined = ""
+            for i, part in enumerate(position_parts):
+                conn = connectors[min(i, len(connectors) - 1)]
+                if i == 0:
+                    joined += part + "。"
+                else:
+                    joined += conn + part + "。"
+            text += joined
+
+        # 未決着の論点
         if unresolved:
-            lines.append("")
-            lines.append("未決着: " + "、".join(unresolved))
-        return "\n".join(lines)
+            text += f"まだ決着がついていない論点として、{'、'.join(unresolved)}が挙がっています。"
+
+        return text
 
     # ═══════════════════════════════════════════════════
     #  v5.2 メソッド（CFR, 動的学習, 応答分類等で使用）
