@@ -1,11 +1,21 @@
-"""bot.py — 栞（Shiori）メインDiscordボット
+"""bot.py — 栞（Shiori）統合版 v4.1 + v5.2
 
 Discordイベント処理の統合ハンドラ。
-on_ready(), on_message(), on_member_remove() を実装する。
+v4.1: T1-T8パイプライン、予測記録、ナッジ、リンク要約、議論要約
+v5.2: CFR、ハートリアクション、動的学習、Haiku最適化
 
 COMMON_MISTAKES §13: llm.py は AsyncAnthropic（非同期クライアント）を使用。
 COMMON_MISTAKES §10: NudgeManager(llm, member_profile) — 2引数必須。
-COMMON_MISTAKES §15: build_nudge_hint() は4引数。
+COMMON_MISTAKES §15: 全参照メソッドが実装済みであること。
+COMMON_MISTAKES §17: 変数スコープの検証済み。
+
+v5.2 Anti-patterns:
+F-01: CFRTracker.is_active() で期限/回数/発動済みを一括チェック
+F-02: mark_cfr_triggered() は送信直後に呼ぶ
+F-03: CFR応答では register_response() しない（直接応答のみ）
+F-12: ハートリアクションは asyncio.create_task で応答と独立
+F-13: remaining_checks は Haiku分析前に同期デクリメント
+F-14: クールダウンは CFR のみ、メンション/返信には影響しない
 
 依存: 全モジュール
 参照: interface_contract.md §2.1, event_flow.md 全体
@@ -20,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord.ext import tasks
 
+# ── 既存モジュール（v4.1） ──
 from llm import LLMClient
 from trust import TrustManager
 from predictions import PredictionLedger
@@ -31,6 +42,16 @@ from rate_limiter import RateLimiter
 from member_profile import MemberProfileManager
 from reactions import ReactionManager
 from errors import format_error_message
+
+# ── v5.2 新モジュール ──
+import config as shiori_config
+from cfr import CFRAnalyzer, CFRTracker
+from haiku_context import HaikuContextManager
+from haiku_prompts import parse_with_default
+from learning_detector import LearningDetector
+from member_query import MemberQueryDetector
+from reaction_handler import ReactionHandler
+from response_generator import ResponseConfig, ResponseGenerator
 
 logger = logging.getLogger("shiori.bot")
 
@@ -92,7 +113,7 @@ T7_USER_TEMPLATE = """以下のDiscord議論を要約してください。
 class ShioriBot(discord.Client):
     """栞（Shiori）メインBotクラス。
 
-    discord.Client を継承。
+    discord.Client を継承。v4.1 + v5.2 統合。
     """
 
     def __init__(self):
@@ -100,6 +121,8 @@ class ShioriBot(discord.Client):
         intents.message_content = True
         intents.members = True
         super().__init__(intents=intents)
+
+        # ═══ v4.1 既存モジュール ═══
 
         # 1. 依存なしモジュール
         self.channel_config = ChannelConfig()
@@ -109,6 +132,7 @@ class ShioriBot(discord.Client):
         self.reactions = ReactionManager()
 
         # 2. LLMクライアント（AsyncAnthropic）
+        #    v5.2: call_haiku() / call_sonnet() メソッドが追加済みであること
         self.llm = LLMClient()
 
         # 3. LLMに依存するモジュール
@@ -121,11 +145,35 @@ class ShioriBot(discord.Client):
             channel_config=self.channel_config,
         )
 
+        # ═══ v5.2 新モジュール ═══
+
+        # CFR（Contextual Follow-up Response）
+        self.cfr_tracker = CFRTracker()
+        self.cfr_analyzer = CFRAnalyzer(self.llm)
+
+        # ハートリアクション（既存 self.reactions とは独立）
+        self.heart_reactions = ReactionHandler()
+
+        # 動的学習
+        self.learning_detector = LearningDetector(self.llm)
+
+        # メンバー質問検出
+        self.member_query_detector = MemberQueryDetector()
+
+        # 応答生成（CFR応答で使用）
+        self.response_generator = ResponseGenerator(self.llm)
+
+        # Haikuコンテキスト管理
+        self.haiku_ctx = HaikuContextManager()
+
     # ─── Discordイベントハンドラ ────────────────────────────
 
     async def on_ready(self) -> None:
         """Bot起動時処理。データファイルロード＋直近100件取得（Q24: B案）"""
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
+
+        # v5.2: BOT_USER_IDをconfig.pyに設定
+        shiori_config.BOT_USER_ID = self.user.id
 
         # 1. データファイルのロード（依存順）
         await self.member_profile.load()
@@ -148,8 +196,9 @@ class ShioriBot(discord.Client):
         member_count = len(self.member_profile.profiles)
         prediction_count = len(self.predictions.predictions)
         logger.info(
-            f"Shiori bot ready. "
-            f"Loaded {member_count} members, {prediction_count} predictions."
+            f"Shiori bot ready (v4.1+v5.2). "
+            f"Loaded {member_count} members, {prediction_count} predictions. "
+            f"CFR={'ON' if shiori_config.CFR_ENABLED else 'OFF'}"
         )
 
     async def on_message(self, message: discord.Message) -> None:
@@ -179,21 +228,37 @@ class ShioriBot(discord.Client):
             and message.reference.resolved.author.id == self.user.id
         )
 
+        # ── v5.2 F-12: ハートリアクション（応答とは独立して実行） ──
+        asyncio.create_task(
+            self._handle_heart_reaction(message, is_reply)
+        )
+
+        # ── v5.2: 動的学習（バックグラウンド） ──
+        asyncio.create_task(self._handle_learning(message))
+
         if is_mention or is_reply:
             # GATE 4: レート制限チェック
+            # F-14: レート制限はメンション/返信にのみ適用（CFRには別のクールダウン）
             if not self.rate_limiter.can_respond(message.channel.id):
                 logger.debug(f"Rate limited in channel {message.channel.id}")
                 return
             await self._handle_mention(message, is_reply=is_reply)
         else:
+            # 受動監視 + v5.2 CFR
             await self._handle_passive(message)
+
+            # v5.2: CFR処理（F-14: CFR専用クールダウン、レート制限とは別）
+            if shiori_config.CFR_ENABLED:
+                await self._handle_cfr(message)
 
     async def on_member_remove(self, member: discord.Member) -> None:
         """メンバー離脱時の匿名化処理（Q26: B案）"""
         anon_name = await self.trust.anonymize_member(member.id)
         logger.info(f"Member {member.id} left. Anonymized as {anon_name}.")
 
-    # ─── 内部処理 ─────────────────────────────────────────
+    # ═══════════════════════════════════════════════════
+    #  メンション/返信トリガー時の応答フロー（v4.1 既存 + v5.2 拡張）
+    # ═══════════════════════════════════════════════════
 
     async def _handle_mention(
         self,
@@ -342,33 +407,33 @@ class ShioriBot(discord.Client):
 
         # STEP 9: システムプロンプト構築
         trust_level = self.trust.get_trust_level(user_id)
-        
+
         # §6.6 コミュニティ知識応答のため、全メンバー情報を取得
         community_knowledge_text = self.member_profile.get_community_knowledge_text(
             compact=False  # 全情報を含める
         )
-        
+
         # STEP 9.5: メンバー質問の検出とハイライト
         # ユーザーのメッセージからメンバー名を抽出し、該当プロファイルをハイライト
         queried_member_highlight = self._extract_and_highlight_queried_member(
             message.content, community_knowledge_text
         )
-        
+
         # DEBUG: ハイライトされたメンバー情報をログ出力
         if queried_member_highlight:
             logger.info(f"[DEBUG] Queried member highlight: {queried_member_highlight[:100]}...")
-        
+
         system_prompt = self.llm.build_system_prompt(
             trust_level=trust_level,
             member_profile=profile,
             channel_overrides=overrides,
             community_knowledge_text=community_knowledge_text,
         )
-        
+
         # ハイライトされたメンバー情報をシステムプロンプトの先頭に追加
         if queried_member_highlight:
             system_prompt = queried_member_highlight + "\n\n" + system_prompt
-        
+
         # DEBUG: システムプロンプトの長さをログ出力
         logger.info(f"[DEBUG] Final system_prompt length: {len(system_prompt)}")
 
@@ -416,9 +481,25 @@ class ShioriBot(discord.Client):
         response_text = response_text.strip()
 
         # STEP 12: 応答送信
-        await message.channel.send(response_text)
+        sent_message = await message.channel.send(response_text)
 
-        # STEP 13: リアクション付与
+        # ═══ v5.2: CFRコンテキスト登録 ═══
+        # F-03: 直接応答のみ登録。CFR応答では register_response() しない。
+        if shiori_config.CFR_ENABLED and response_text:
+            try:
+                summary = self.haiku_ctx.summarize_shiori_response(response_text)
+                self.cfr_tracker.register_response(
+                    sent_message.id, message.channel.id, summary
+                )
+                logger.debug(
+                    "CFR context registered: channel=%d, msg=%d",
+                    message.channel.id,
+                    sent_message.id,
+                )
+            except Exception as e:
+                logger.warning(f"CFR registration failed: {e}")
+
+        # STEP 13: リアクション付与（既存: 予測/プレモーテム/高信頼度リアクション）
         if prediction_context:
             await self.reactions.add_reaction(message, "prediction")
         if premortem_hint:
@@ -428,6 +509,134 @@ class ShioriBot(discord.Client):
 
         # STEP 14: レート制限記録
         self.rate_limiter.record_response(message.channel.id)
+
+    # ═══════════════════════════════════════════════════
+    #  v5.2: CFR（Contextual Follow-up Response）処理
+    # ═══════════════════════════════════════════════════
+
+    async def _handle_cfr(self, message: discord.Message) -> None:
+        """CFR判定・応答。栞の直前発言へのフォローアップを検出して短く返す。
+
+        F-01: check_followup() 内で is_active() チェック＆同期デクリメント
+        F-02: 送信後すぐに mark_cfr_triggered() を呼ぶ
+        F-03: CFR応答は新たな CFR コンテキストを生成しない
+        F-14: クールダウンは CFR のみに適用
+        """
+        channel_id = message.channel.id
+
+        # F-14: CFR専用クールダウンチェック
+        if self.cfr_tracker.is_channel_on_cooldown(channel_id):
+            return
+
+        # F-01 + F-13: check_followup でアクティブ判定＆残回数デクリメント
+        context = self.cfr_tracker.check_followup(channel_id)
+        if context is None:
+            return
+
+        # CFR関連性判定（Haiku）
+        try:
+            result = await self.cfr_analyzer.analyze(
+                context.shiori_response_summary, message.content or ""
+            )
+        except Exception as e:
+            logger.warning(f"CFR analysis failed: {e}")
+            return
+
+        if not result.should_respond:
+            logger.debug(
+                "CFR not triggered: channel=%d, confidence=%.2f",
+                channel_id,
+                result.confidence,
+            )
+            return
+
+        # CFR応答生成
+        cfr_config = ResponseConfig(
+            response_type="cfr",
+            max_chars=100,
+            allow_question=False,
+            question_style="none",
+        )
+        try:
+            cfr_response = await self.response_generator.generate(
+                message, cfr_config, context=context.shiori_response_summary
+            )
+        except Exception as e:
+            logger.warning(f"CFR response generation failed: {e}")
+            return
+
+        if not cfr_response:
+            return
+
+        # F-02: 送信と mark_cfr_triggered をセットで実行
+        await message.channel.send(cfr_response)
+        self.cfr_tracker.mark_cfr_triggered(channel_id)
+
+        logger.info(
+            "CFR triggered: channel=%d, confidence=%.2f, type=%s",
+            channel_id,
+            result.confidence,
+            result.relevance_type,
+        )
+
+    # ═══════════════════════════════════════════════════
+    #  v5.2: ハートリアクション処理
+    # ═══════════════════════════════════════════════════
+
+    async def _handle_heart_reaction(
+        self,
+        message: discord.Message,
+        is_reply_to_shiori: bool,
+    ) -> None:
+        """F-12: ハートリアクション判定・付与。応答とは独立して実行される。
+
+        栞への好意的な返信（「ありがとう」「いいね」等）にハートを付ける。
+        asyncio.create_task() で呼び出されるため、例外を内部で処理する。
+        """
+        try:
+            content = message.content or ""
+            if not content:
+                return
+            if self.heart_reactions.should_heart_react(content, is_reply_to_shiori):
+                await self.heart_reactions.add_heart_reaction(message)
+        except Exception:
+            logger.exception("Heart reaction handling error")
+
+    # ═══════════════════════════════════════════════════
+    #  v5.2: 動的学習処理
+    # ═══════════════════════════════════════════════════
+
+    async def _handle_learning(self, message: discord.Message) -> None:
+        """バックグラウンドでの動的学習。メンバーの新情報を自動検出・記録する。
+
+        F-15: LearningDetector内で正規表現プレチェック → Haiku判定の2段階。
+        asyncio.create_task() で呼び出されるため、例外を内部で処理する。
+        """
+        try:
+            content = message.content or ""
+            if not content or len(content) < 10:
+                return
+
+            # 正規表現プレフィルタ → Haiku判定
+            result = await self.learning_detector.detect(
+                content, message.author.display_name
+            )
+            if result.has_learnable_info and result.extracted_info:
+                user_id = str(message.author.id)
+                await self.member_profile.add_dynamic_memo(
+                    user_id, result.extracted_info
+                )
+                logger.info(
+                    "Dynamic learning: user=%s, info='%s'",
+                    message.author.display_name,
+                    result.extracted_info[:50],
+                )
+        except Exception:
+            logger.exception("Learning detection error")
+
+    # ═══════════════════════════════════════════════════
+    #  受動監視（v4.1 既存）
+    # ═══════════════════════════════════════════════════
 
     async def _handle_passive(self, message: discord.Message) -> None:
         """受動監視フロー。応答は生成しない。"""
@@ -455,6 +664,10 @@ class ShioriBot(discord.Client):
             and t1_result.get("confidence", 0) >= 0.6
         ):
             await self.passive_monitor.process_prediction(msg_dict, t1_result)
+
+    # ═══════════════════════════════════════════════════
+    #  起動時処理
+    # ═══════════════════════════════════════════════════
 
     async def _startup_fetch(self) -> None:
         """起動時の直近100件メッセージ取得と予測スキャン（Q24: B案）"""
@@ -579,51 +792,39 @@ class ShioriBot(discord.Client):
         community_knowledge_text: str,
     ) -> str | None:
         """メッセージからメンバー名を抽出し、該当プロファイルをハイライトする。
-        
+
         「〇〇さんについて」「〇〇って誰」等のパターンを検出し、
         該当メンバーの情報をシステムプロンプトの先頭に配置するためのテキストを生成。
-        
+
         Args:
             message_content: ユーザーのメッセージ
             community_knowledge_text: コミュニティ知識テキスト（未使用、互換性のため残す）
-            
+
         Returns:
             str | None: ハイライトテキスト。該当なしの場合はNone。
         """
         # メンション記法を除去してからパターンマッチ
         clean_content = re.sub(r'<@!?\d+>\s*', '', message_content).strip()
         logger.info(f"[DEBUG] Clean message content: '{clean_content}'")
-        
-        # メンバー質問パターン（優先順位順）
-        patterns = [
-            # "〇〇さんについて教えて" "〇〇さんについておしえて"
-            r'([^\s]+?)さん(?:について|って|の(?:印象|こと))(?:教えて|おしえて)?',
-            # "〇〇について教えて"
-            r'([^\s]+?)(?:について|って誰|とは|ってどんな)(?:教えて|おしえて)?',
-        ]
-        
-        queried_name = None
-        for pattern in patterns:
-            match = re.search(pattern, clean_content)
-            if match:
-                queried_name = match.group(1).strip()
-                break
-        
+
+        # v5.2: MemberQueryDetector を使ったクリーンな検出
+        queried_name = self.member_query_detector.detect_queried_member(clean_content)
+
         if not queried_name:
             logger.info("[DEBUG] No member name pattern detected")
             return None
-        
+
         logger.info(f"[DEBUG] Detected queried member name: '{queried_name}'")
-        
+
         # member_profile.py のメソッドを使って検索
         member_summary = self.member_profile.get_member_summary_for_highlight(queried_name)
-        
+
         if not member_summary:
             logger.info(f"[DEBUG] Member '{queried_name}' not found in profiles")
             return None
-        
+
         logger.info(f"[DEBUG] Found member summary for '{queried_name}'")
-        
+
         # ハイライトテキストを生成
         highlight = f"""
 ================================================================
@@ -648,6 +849,9 @@ class ShioriBot(discord.Client):
         """定期タスクを開始する。"""
         self._check_trust_decay.start()
         self._auto_save.start()
+        # v5.2: CFRクリーンアップループ
+        if shiori_config.CFR_ENABLED:
+            self._cfr_cleanup.start()
 
     @tasks.loop(hours=24)
     async def _check_trust_decay(self) -> None:
@@ -673,7 +877,29 @@ class ShioriBot(discord.Client):
         """30分ごとにデータファイルを書き出す。"""
         await self.trust.save()
         await self.predictions.save()
+        # v5.2: メンバープロファイル（動的メモ含む）の定期保存
+        try:
+            await self.member_profile.save()
+        except Exception:
+            logger.exception("member_profile auto-save failed")
         logger.debug("Auto-save completed")
+
+    @tasks.loop(minutes=1)
+    async def _cfr_cleanup(self) -> None:
+        """v5.2: 期限切れCFRコンテキストの定期クリーンアップ。"""
+        self.cfr_tracker.cleanup_expired()
+
+    @_check_trust_decay.before_loop
+    async def _before_trust_decay(self) -> None:
+        await self.wait_until_ready()
+
+    @_auto_save.before_loop
+    async def _before_auto_save(self) -> None:
+        await self.wait_until_ready()
+
+    @_cfr_cleanup.before_loop
+    async def _before_cfr_cleanup(self) -> None:
+        await self.wait_until_ready()
 
 
 def main():
