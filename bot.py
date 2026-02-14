@@ -17,6 +17,9 @@ F-12: ハートリアクションは asyncio.create_task で応答と独立
 F-13: remaining_checks は Haiku分析前に同期デクリメント
 F-14: クールダウンは CFR のみ、メンション/返信には影響しない
 
+v5.2-fix1: _handle_passive 例外が _handle_cfr をブロックしないよう分離
+v5.2-fix1: CFR登録ログを DEBUG→INFO に昇格（Railway診断用）
+
 依存: 全モジュール
 参照: interface_contract.md §2.1, event_flow.md 全体
 """
@@ -196,7 +199,7 @@ class ShioriBot(discord.Client):
         member_count = len(self.member_profile.profiles)
         prediction_count = len(self.predictions.predictions)
         logger.info(
-            f"Shiori bot ready (v4.1+v5.2). "
+            f"Shiori bot ready (v4.1+v5.2-fix1). "
             f"Loaded {member_count} members, {prediction_count} predictions. "
             f"CFR={'ON' if shiori_config.CFR_ENABLED else 'OFF'}"
         )
@@ -244,12 +247,18 @@ class ShioriBot(discord.Client):
                 return
             await self._handle_mention(message, is_reply=is_reply)
         else:
-            # 受動監視 + v5.2 CFR
-            await self._handle_passive(message)
+            # ── v5.2-fix1: _handle_passive の例外が _handle_cfr をブロックしないよう分離 ──
+            try:
+                await self._handle_passive(message)
+            except Exception as e:
+                logger.warning(f"Passive monitor failed (non-fatal): {e}")
 
             # v5.2: CFR処理（F-14: CFR専用クールダウン、レート制限とは別）
             if shiori_config.CFR_ENABLED:
-                await self._handle_cfr(message)
+                try:
+                    await self._handle_cfr(message)
+                except Exception as e:
+                    logger.warning(f"CFR handling failed (non-fatal): {e}")
 
     async def on_member_remove(self, member: discord.Member) -> None:
         """メンバー離脱時の匿名化処理（Q26: B案）"""
@@ -491,10 +500,12 @@ class ShioriBot(discord.Client):
                 self.cfr_tracker.register_response(
                     sent_message.id, message.channel.id, summary
                 )
-                logger.debug(
-                    "CFR context registered: channel=%d, msg=%d",
+                # v5.2-fix1: DEBUG→INFO に昇格（Railway診断用）
+                logger.info(
+                    "CFR context registered: channel=%d, msg=%d, summary='%s'",
                     message.channel.id,
                     sent_message.id,
+                    summary[:60] if summary else "(empty)",
                 )
             except Exception as e:
                 logger.warning(f"CFR registration failed: {e}")
@@ -533,6 +544,14 @@ class ShioriBot(discord.Client):
         if context is None:
             return
 
+        # v5.2-fix1: CFR候補検出をINFOでログ（診断用）
+        logger.info(
+            "CFR candidate detected: channel=%d, user=%s, content='%s'",
+            channel_id,
+            message.author.display_name,
+            (message.content or "")[:80],
+        )
+
         # CFR関連性判定（Haiku）
         try:
             result = await self.cfr_analyzer.analyze(
@@ -543,7 +562,7 @@ class ShioriBot(discord.Client):
             return
 
         if not result.should_respond:
-            logger.debug(
+            logger.info(
                 "CFR not triggered: channel=%d, confidence=%.2f",
                 channel_id,
                 result.confidence,
