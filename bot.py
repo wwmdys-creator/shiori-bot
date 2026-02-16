@@ -1,13 +1,15 @@
-"""bot.py — 栞（Shiori）統合版 v4.1 + v5.2
+"""bot.py — 栞（Shiori）統合版 v4.1 + v5.2 + v5.3-Phase3
 
 Discordイベント処理の統合ハンドラ。
 v4.1: T1-T8パイプライン、予測記録、ナッジ、リンク要約、議論要約
 v5.2: CFR、ハートリアクション、動的学習、Haiku最適化
+v5.3-Phase3: 日次メンテナンス（DailyMaintenanceTask）、週次独り言（WeeklyMonologueTask）
 
 COMMON_MISTAKES §13: llm.py は AsyncAnthropic（非同期クライアント）を使用。
 COMMON_MISTAKES §10: NudgeManager(llm, member_profile) — 2引数必須。
 COMMON_MISTAKES §15: 全参照メソッドが実装済みであること。
 COMMON_MISTAKES §17: 変数スコープの検証済み。
+COMMON_MISTAKES §18: seed/ と data/ のパス分離を遵守。
 
 v5.2 Anti-patterns:
 F-01: CFRTracker.is_active() で期限/回数/発動済みを一括チェック
@@ -17,18 +19,24 @@ F-12: ハートリアクションは asyncio.create_task で応答と独立
 F-13: remaining_checks は Haiku分析前に同期デクリメント
 F-14: クールダウンは CFR のみ、メンション/返信には影響しない
 
+v5.3 Phase3:
+P3-01: DailyMaintenanceTask(bot) — コンストラクタ注入（§12.9）
+P3-02: WeeklyMonologueTask(bot) — コンストラクタ注入（§12.9）
+P3-03: 日次ループ 18:00 JST / 週次ループ 日曜 21:00 JST（§12.11）
+P3-04: 各ループの例外は内部で処理（N-05 エラー隔離原則）
+
 v5.2-fix1: _handle_passive 例外が _handle_cfr をブロックしないよう分離
 v5.2-fix1: CFR登録ログを DEBUG→INFO に昇格（Railway診断用）
 
 依存: 全モジュール
-参照: interface_contract.md §2.1, event_flow.md 全体
+参照: interface_contract.md §2.1, event_flow.md 全体, §12 v5.3インターフェース契約
 """
 
 import os
 import re
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import discord
 from discord.ext import tasks
@@ -55,6 +63,10 @@ from learning_detector import LearningDetector
 from member_query import MemberQueryDetector
 from reaction_handler import ReactionHandler
 from response_generator import ResponseConfig, ResponseGenerator
+
+# ── v5.3 Phase3 新モジュール ──
+from daily_maintenance import DailyMaintenanceTask
+from weekly_monologue import WeeklyMonologueTask
 
 logger = logging.getLogger("shiori.bot")
 
@@ -169,6 +181,11 @@ class ShioriBot(discord.Client):
         # Haikuコンテキスト管理
         self.haiku_ctx = HaikuContextManager()
 
+        # ═══ v5.3 Phase3 モジュール ═══
+        # §12.9: コンストラクタ注入パターン — bot インスタンスを渡す
+        self.daily_maintenance = DailyMaintenanceTask(self)
+        self.weekly_monologue = WeeklyMonologueTask(self)
+
     # ─── Discordイベントハンドラ ────────────────────────────
 
     async def on_ready(self) -> None:
@@ -199,7 +216,7 @@ class ShioriBot(discord.Client):
         member_count = len(self.member_profile.profiles)
         prediction_count = len(self.predictions.predictions)
         logger.info(
-            f"Shiori bot ready (v4.1+v5.2-fix1). "
+            f"Shiori bot ready (v4.1+v5.2+v5.3-Phase3). "
             f"Loaded {member_count} members, {prediction_count} predictions. "
             f"CFR={'ON' if shiori_config.CFR_ENABLED else 'OFF'}"
         )
@@ -871,6 +888,9 @@ class ShioriBot(discord.Client):
         # v5.2: CFRクリーンアップループ
         if shiori_config.CFR_ENABLED:
             self._cfr_cleanup.start()
+        # v5.3 Phase3: 日次メンテナンス＋週次独り言
+        self._daily_maintenance_loop.start()
+        self._weekly_monologue_loop.start()
 
     @tasks.loop(hours=24)
     async def _check_trust_decay(self) -> None:
@@ -908,6 +928,42 @@ class ShioriBot(discord.Client):
         """v5.2: 期限切れCFRコンテキストの定期クリーンアップ。"""
         self.cfr_tracker.cleanup_expired()
 
+    # ── v5.3 Phase3: 日次メンテナンスループ（§5, §12.11） ──
+
+    @tasks.loop(time=time(hour=18, minute=0, tzinfo=JST))  # 18:00 JST
+    async def _daily_maintenance_loop(self) -> None:
+        """毎日 18:00 JST に日次メンテナンスを実行する。
+
+        処理順序（§5.6, T13-36）:
+          (1) 信頼度減衰 → (2) 予測期限チェック → (3) 統計集計
+          → (4) ハイライト選定 → (5) レポート生成 → (6) Shiori_chに投稿
+
+        N-05: 例外は内部で処理し、メイン処理に影響させない。
+        """
+        try:
+            logger.info("[DailyMaintenance] Starting daily data maintenance...")
+            stats = await self.daily_maintenance.run_daily_maintenance()
+            await self.daily_maintenance.post_daily_report(stats)
+            logger.info(f"[DailyMaintenance] Completed: {stats}")
+        except Exception as e:
+            logger.error(f"[DailyMaintenance] Failed: {e}", exc_info=True)
+
+    # ── v5.3 Phase3: 週次独り言ループ（§8, §12.11） ──
+
+    @tasks.loop(time=time(hour=21, minute=0, tzinfo=JST))  # 日曜 21:00 JST
+    async def _weekly_monologue_loop(self) -> None:
+        """日曜 21:00 JST に週次フィールドノートを投稿する。
+
+        WeeklyMonologueTask.weekly_monologue_loop() 内部で
+        曜日チェック（MONOLOGUE_DAY）を行い、日曜以外はスキップする。
+
+        N-05: 例外は内部で処理し、メイン処理に影響させない。
+        """
+        try:
+            await self.weekly_monologue.weekly_monologue_loop()
+        except Exception as e:
+            logger.error(f"[WeeklyMonologue] Failed: {e}", exc_info=True)
+
     @_check_trust_decay.before_loop
     async def _before_trust_decay(self) -> None:
         await self.wait_until_ready()
@@ -918,6 +974,14 @@ class ShioriBot(discord.Client):
 
     @_cfr_cleanup.before_loop
     async def _before_cfr_cleanup(self) -> None:
+        await self.wait_until_ready()
+
+    @_daily_maintenance_loop.before_loop
+    async def _before_daily_maintenance(self) -> None:
+        await self.wait_until_ready()
+
+    @_weekly_monologue_loop.before_loop
+    async def _before_weekly_monologue(self) -> None:
         await self.wait_until_ready()
 
 
