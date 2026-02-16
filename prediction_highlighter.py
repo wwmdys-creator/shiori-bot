@@ -1,28 +1,51 @@
-"""
-予測ハイライト選定モジュール — prediction_highlighter.py
-v5.3 新規（§5.7, §5.8 日次メンテナンス用）
+"""prediction_highlighter.py — 未解決予測ハイライト選定
 
-依存: config.py (APPROACHING_MONTHS, INACTIVE_DAYS, MAX_HIGHLIGHTS)
+§5.7, §5.8 準拠。日次報告に含める「期限接近」「対立予測ペア」を選定する。
+
+インターフェース契約: §12.7.3
+依存: config.py（定数）
+呼び出し元: daily_maintenance.py
+
+COMMON_MISTAKES対応:
+  §10: select_highlights() のシグネチャは §12.7.3 に厳密に準拠
+  §13: 本モジュールはasync不要（sync関数のみ）
+  §15: 全メソッドに最低限の動作実装あり（スタブなし）
 """
 
 import logging
 from datetime import datetime, timedelta
 
-from config import APPROACHING_MONTHS, INACTIVE_DAYS, MAX_HIGHLIGHTS
+logger = logging.getLogger("shiori.prediction_highlighter")
 
-logger = logging.getLogger(__name__)
+# --- 定数（config.py から参照。ここではフォールバック値を定義） ---
+# 実運用では config.py の値を使う。テスト容易性のためクラス属性で保持。
+_DEFAULT_APPROACHING_MONTHS = 6
+_DEFAULT_INACTIVE_DAYS = 30
+_DEFAULT_MAX_HIGHLIGHTS = 2
 
 
 class PredictionHighlighter:
-    """未解決予測ハイライト選定（§5.7, §5.8, §12.7.3）
+    """未解決予測ハイライト選定（§5.7, §5.8 詳細参照）
 
-    日次メンテナンス報告に含めるハイライト（最大2件）を選定する。
-
-    選定基準（優先順位順）:
-      1. 対立予測ペア（同一テーマで異なる結論）
-      2. 期限接近予測（APPROACHING_MONTHS 以内に期限到来）
-      3. 投稿者の最終活動が INACTIVE_DAYS 以上前のもの
+    日次報告(§5)の「📌 気になる予測メモ」セクション用に、
+    注目すべき予測を最大2件選定する。
     """
+
+    def __init__(
+        self,
+        approaching_months: int = _DEFAULT_APPROACHING_MONTHS,
+        inactive_days: int = _DEFAULT_INACTIVE_DAYS,
+        max_highlights: int = _DEFAULT_MAX_HIGHLIGHTS,
+    ) -> None:
+        """
+        Args:
+            approaching_months: 期限接近判定の月数（config.APPROACHING_MONTHS）
+            inactive_days: 非活動判定の日数（config.INACTIVE_DAYS）
+            max_highlights: 1回あたりの最大ハイライト数（config.MAX_HIGHLIGHTS）
+        """
+        self.approaching_months = approaching_months
+        self.inactive_days = inactive_days
+        self.max_highlights = max_highlights
 
     def select_highlights(
         self,
@@ -30,206 +53,244 @@ class PredictionHighlighter:
         member_profiles: dict,
         current_date: datetime,
     ) -> list[dict]:
-        """ハイライト対象の予測を選定する（§12.7.3）
+        """ハイライト対象の予測を選定する
+
+        選定基準（優先順位順）:
+            1. 対立予測ペア（同一テーマで異なる結論）
+            2. 期限接近予測（approaching_months以内に期限到来）
+            3. 投稿者の最終活動がinactive_days以上前のもの
 
         Args:
-            predictions:     予測データのリスト
-                             各要素: {"user_id", "content", "target_date",
-                                      "category", "created_at", ...}
-            member_profiles: メンバープロファイル辞書
-                             {user_id: {"display_name", "last_active", ...}}
-            current_date:    現在日時
+            predictions: 予測データのリスト。各要素は以下を含む:
+                - "id": str (予測ID、例: "#0032")
+                - "author": str (投稿者username)
+                - "author_display_name": str (投稿者表示名)
+                - "content": str (予測内容)
+                - "category": str (カテゴリ)
+                - "timeline_start": str | None (開始年 "YYYY" or "?")
+                - "timeline_end": str | None (終了年 "YYYY" or "?")
+                - "status": str ("active" | "resolved" | "expired")
+            member_profiles: メンバープロファイル辞書 (username -> profile)
+                各profileは "last_active" (datetime | None) を含みうる
+            current_date: 現在日時（JST）
 
         Returns:
-            list[dict] — 最大 MAX_HIGHLIGHTS 件。§12.4.3 形式:
+            list[dict] — 最大 max_highlights 件。§12.4.3 形式:
                 [{"type": str, "predictions": list, "narrative": str}, ...]
             空リスト: 該当なし
-        """
-        if not predictions:
-            return []
 
+        ⚠️ len(result) <= self.max_highlights
+        """
         highlights: list[dict] = []
 
-        # 1. 対立予測ペアの検出
+        # 未解決予測のみを対象
+        active_predictions = [
+            p for p in predictions
+            if p.get("status", "active") == "active"
+        ]
+
+        if not active_predictions:
+            logger.debug("[PredictionHighlighter] No active predictions found")
+            return []
+
+        # --- 優先度1: 対立予測ペア ---
         try:
-            opposing = self._find_opposing_pairs(predictions)
+            opposing = self._find_opposing_pairs(active_predictions)
             for pair in opposing:
-                if len(highlights) >= MAX_HIGHLIGHTS:
+                if len(highlights) >= self.max_highlights:
                     break
                 highlights.append(pair)
-        except Exception as exc:
-            logger.error("対立予測検出エラー: %s", exc)
-
-        # 2. 期限接近予測の検出
-        try:
-            approaching = self._find_approaching_deadlines(
-                predictions, current_date
+        except Exception as e:
+            logger.error(
+                f"[PredictionHighlighter] Opposing pair detection failed: {e}"
             )
-            for item in approaching:
-                if len(highlights) >= MAX_HIGHLIGHTS:
-                    break
-                # 重複チェック（同じ予測を含まない）
-                if not self._has_overlap(highlights, item):
-                    highlights.append(item)
-        except Exception as exc:
-            logger.error("期限接近予測検出エラー: %s", exc)
+            # エラー隔離: 対立ペア検出失敗でも次の選定に進む
+
+        # --- 優先度2: 期限接近予測 ---
+        if len(highlights) < self.max_highlights:
+            try:
+                approaching = self._find_approaching_predictions(
+                    active_predictions, current_date
+                )
+                for pred_highlight in approaching:
+                    if len(highlights) >= self.max_highlights:
+                        break
+                    # 既にハイライト済みの予測IDと重複しないかチェック
+                    existing_ids = self._get_highlighted_ids(highlights)
+                    pred_ids = {
+                        p.get("id")
+                        for p in pred_highlight.get("predictions", [])
+                    }
+                    if not pred_ids & existing_ids:
+                        highlights.append(pred_highlight)
+            except Exception as e:
+                logger.error(
+                    f"[PredictionHighlighter] Approaching detection failed: {e}"
+                )
+
+        # --- 優先度3: 長期未更新メンバーの予測 ---
+        if len(highlights) < self.max_highlights:
+            try:
+                inactive = self._find_inactive_member_predictions(
+                    active_predictions, member_profiles, current_date
+                )
+                for pred_highlight in inactive:
+                    if len(highlights) >= self.max_highlights:
+                        break
+                    existing_ids = self._get_highlighted_ids(highlights)
+                    pred_ids = {
+                        p.get("id")
+                        for p in pred_highlight.get("predictions", [])
+                    }
+                    if not pred_ids & existing_ids:
+                        highlights.append(pred_highlight)
+            except Exception as e:
+                logger.error(
+                    f"[PredictionHighlighter] Inactive member detection failed: {e}"
+                )
 
         logger.info(
-            "ハイライト選定完了: %d件 / 候補予測%d件",
-            len(highlights), len(predictions),
+            f"[PredictionHighlighter] Selected {len(highlights)} highlights"
         )
-        return highlights[:MAX_HIGHLIGHTS]
+        return highlights[:self.max_highlights]
+
+    # ===== 内部メソッド =====
 
     def _find_opposing_pairs(
-        self, predictions: list[dict],
+        self, predictions: list[dict]
     ) -> list[dict]:
-        """同一テーマで対立する予測ペアを検出する
+        """同一カテゴリで異なるタイムラインを持つ対立ペアを検出"""
+        pairs: list[dict] = []
 
-        カテゴリが同一で、結論が異なる予測をペアリング。
-
-        Returns:
-            list[dict] — §12.4.3 形式のハイライトリスト
-        """
-        # カテゴリ別にグループ化
+        # カテゴリ別にグルーピング
         by_category: dict[str, list[dict]] = {}
         for pred in predictions:
-            cat = pred.get("category", "unknown")
-            if cat and cat != "unknown":
+            cat = pred.get("category", "")
+            if cat:
                 by_category.setdefault(cat, []).append(pred)
 
-        pairs = []
-        for cat, preds in by_category.items():
-            if len(preds) < 2:
+        for cat, cat_preds in by_category.items():
+            if len(cat_preds) < 2:
                 continue
 
-            # 投稿者が異なるペアを探す
-            seen_users = set()
-            candidates = []
-            for p in preds:
-                uid = p.get("user_id", "")
-                if uid not in seen_users:
-                    seen_users.add(uid)
-                    candidates.append(p)
-
-            if len(candidates) >= 2:
-                pair = {
-                    "type": "opposing",
-                    "predictions": candidates[:2],
-                    "narrative": self._build_opposing_narrative(
-                        candidates[0], candidates[1], cat
-                    ),
-                }
-                pairs.append(pair)
-
-        return pairs
-
-    def _find_approaching_deadlines(
-        self,
-        predictions: list[dict],
-        current_date: datetime,
-    ) -> list[dict]:
-        """期限が APPROACHING_MONTHS 以内に到来する予測を検出する
-
-        Returns:
-            list[dict] — §12.4.3 形式のハイライトリスト
-        """
-        threshold = current_date + timedelta(
-            days=APPROACHING_MONTHS * 30  # 概算
-        )
-        approaching = []
-
-        for pred in predictions:
-            target_date_str = pred.get("target_date", "")
-            if not target_date_str:
+            # タイムライン終了年でソートし、最も差が大きいペアを選定
+            with_timeline = [
+                p for p in cat_preds
+                if p.get("timeline_end") and p["timeline_end"] != "?"
+            ]
+            if len(with_timeline) < 2:
                 continue
 
+            with_timeline.sort(
+                key=lambda p: int(p.get("timeline_end", "9999"))
+            )
+            earliest = with_timeline[0]
+            latest = with_timeline[-1]
+
+            # 少なくとも3年差がある場合のみ「対立」とみなす
             try:
-                target_date = self._parse_date(target_date_str)
+                diff = int(latest["timeline_end"]) - int(earliest["timeline_end"])
+                if diff >= 3:
+                    display_text = (
+                        f"{earliest.get('id', '?')} "
+                        f"{earliest.get('author_display_name', '?')}さんの予測"
+                        f"（{earliest.get('timeline_end')}年）vs "
+                        f"{latest.get('id', '?')} "
+                        f"{latest.get('author_display_name', '?')}さんの予測"
+                        f"（{latest.get('timeline_end')}年）"
+                    )
+                    pairs.append({
+                        "type": "opposing",
+                        "predictions": [earliest, latest],
+                        "narrative": display_text,
+                    })
             except (ValueError, TypeError):
                 continue
 
-            # 過去の期限は除外、threshold 以内のものを対象
-            if current_date < target_date <= threshold:
-                approaching.append(pred)
+        return pairs
 
-        # 期限が近い順にソート
-        approaching.sort(
-            key=lambda p: self._parse_date(p.get("target_date", "")),
-        )
+    def _find_approaching_predictions(
+        self, predictions: list[dict], current_date: datetime
+    ) -> list[dict]:
+        """期限が approaching_months 以内に到来する予測を検出"""
+        results: list[dict] = []
+        cutoff = current_date + timedelta(days=self.approaching_months * 30)
+        cutoff_year = cutoff.year
 
-        results = []
-        for pred in approaching:
-            results.append({
-                "type": "approaching",
-                "predictions": [pred],
-                "narrative": self._build_approaching_narrative(
-                    pred, current_date
-                ),
-            })
+        for pred in predictions:
+            timeline_end = pred.get("timeline_end")
+            if not timeline_end or timeline_end == "?":
+                continue
+            try:
+                end_year = int(timeline_end)
+                if current_date.year <= end_year <= cutoff_year:
+                    display_name = pred.get("author_display_name", "?")
+                    display_text = (
+                        f"{pred.get('id', '?')}の予測"
+                        f"（{display_name}さん、{end_year}年期限）"
+                        f"がまもなく検証時期です"
+                    )
+                    results.append({
+                        "type": "approaching",
+                        "predictions": [pred],
+                        "narrative": display_text,
+                    })
+            except (ValueError, TypeError):
+                continue
+
         return results
 
-    def _build_opposing_narrative(
+    def _find_inactive_member_predictions(
         self,
-        pred_a: dict,
-        pred_b: dict,
-        category: str,
-    ) -> str:
-        """対立予測のナラティブを生成する"""
-        name_a = pred_a.get("display_name", pred_a.get("user_id", "?"))
-        name_b = pred_b.get("display_name", pred_b.get("user_id", "?"))
-        return (
-            f"「{category}」について、{name_a}さんと{name_b}さんの間で"
-            f"見解が分かれています。"
-        )
-
-    def _build_approaching_narrative(
-        self,
-        pred: dict,
+        predictions: list[dict],
+        member_profiles: dict,
         current_date: datetime,
-    ) -> str:
-        """期限接近予測のナラティブを生成する"""
-        name = pred.get("display_name", pred.get("user_id", "?"))
-        target = pred.get("target_date", "不明")
-        content_preview = (pred.get("content", "")[:40] + "...")
-        return (
-            f"{name}さんの予測「{content_preview}」の期限（{target}）が"
-            f"近づいています。"
-        )
+    ) -> list[dict]:
+        """投稿者が inactive_days 以上未活動の予測を検出"""
+        results: list[dict] = []
+        cutoff_date = current_date - timedelta(days=self.inactive_days)
 
-    def _has_overlap(
-        self,
-        existing: list[dict],
-        candidate: dict,
-    ) -> bool:
-        """既存ハイライトと候補の予測が重複していないかチェック"""
-        candidate_ids = {
-            p.get("user_id", "") + p.get("content", "")
-            for p in candidate.get("predictions", [])
-        }
-        for h in existing:
-            for p in h.get("predictions", []):
-                key = p.get("user_id", "") + p.get("content", "")
-                if key in candidate_ids:
-                    return True
-        return False
+        for pred in predictions:
+            author = pred.get("author", "")
+            if not author:
+                continue
+
+            profile = member_profiles.get(author, {})
+            last_active = profile.get("last_active")
+
+            if last_active is None:
+                # last_active情報がない場合はスキップ
+                continue
+
+            # last_active が datetime でなければ変換を試みる
+            if isinstance(last_active, str):
+                try:
+                    last_active = datetime.fromisoformat(last_active)
+                except (ValueError, TypeError):
+                    continue
+
+            if last_active < cutoff_date:
+                display_name = pred.get("author_display_name", author)
+                display_text = (
+                    f"{pred.get('id', '?')}の予測、"
+                    f"最近お見かけしない{display_name}さん"
+                    f"はどうお考えか気になります"
+                )
+                results.append({
+                    "type": "inactive_member",
+                    "predictions": [pred],
+                    "narrative": display_text,
+                })
+
+        return results
 
     @staticmethod
-    def _parse_date(date_str: str) -> datetime:
-        """日付文字列をパースする
-
-        対応フォーマット:
-          - "2030" → 2030-01-01
-          - "2030-06" → 2030-06-01
-          - "2030-06-15" → 2030-06-15
-        """
-        date_str = date_str.strip()
-
-        if len(date_str) == 4 and date_str.isdigit():
-            return datetime(int(date_str), 1, 1)
-
-        if len(date_str) == 7 and date_str[4] == "-":
-            parts = date_str.split("-")
-            return datetime(int(parts[0]), int(parts[1]), 1)
-
-        # ISO format
-        return datetime.fromisoformat(date_str)
+    def _get_highlighted_ids(highlights: list[dict]) -> set[str]:
+        """既存ハイライトに含まれる予測IDを集める"""
+        ids: set[str] = set()
+        for h in highlights:
+            for p in h.get("predictions", []):
+                pid = p.get("id")
+                if pid:
+                    ids.add(pid)
+        return ids
