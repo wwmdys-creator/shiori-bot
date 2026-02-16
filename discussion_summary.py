@@ -1,48 +1,73 @@
-"""discussion_summary.py — 議論まとめ機能（メンバー名指定対応）
+"""
+discussion_summary.py - 議論まとめ機能強化
 
-§7 準拠。v5.2の一般要約に加え、v5.3ではメンバー名指定での
-会話取得・要約を追加する。
+Shiori v5.3 - §7 議論まとめ機能の強化
+Interface Contract: §12.7.6
+Error Pattern: N-05（例外隔離）, N-07（メンバー名照合4段階フォールバック）
 
-インターフェース契約: §12.7.6
-依存: discord.py, Sonnet API
-呼び出し元: bot.py (on_message ハンドラ)
-
-COMMON_MISTAKES対応:
-  N-07: メンバー名照合は完全一致→部分一致の順（§12.7.6）
-  F-10: 要約出力は箇条書き禁止、文章形式（§7.6.2, §27）
-  §15: 各ステップにエラー隔離
+v5.2では「まとめて」「要約して」等のトリガーで議論要約を生成していたが、
+v5.3ではメンバー名指定での会話取得、柔軟な名前照合、
+件数に応じたフォールバック対応を追加する。
 """
 
 import logging
 import re
 
-logger = logging.getLogger("shiori.discussion_summary")
+import discord
+from anthropic import AsyncAnthropic
+
+logger = logging.getLogger(__name__)
+
+# ============================================================
+# 定数定義
+# ============================================================
+
+# LLMモデル（デュアルモデルアーキテクチャ: Sonnet for creative tasks）
+MAIN_MODEL = "claude-sonnet-4-20250514"
+SUMMARY_MAX_TOKENS = 1000
+
+# フェッチ制限（Q8/Q9決定: チャンネルのみ、直近100件）
+FETCH_LIMIT = 100
+
+# 部分一致の最小クエリ長（Q10決定: 3文字以上）
+PARTIAL_MATCH_MIN_LENGTH = 3
+
+# 照合結果の上限（N-07: 上限3名まで返す）
+MAX_RESOLVE_RESULTS = 3
 
 
-# ===== 要約依頼パターン（§7.2.1） =====
+# ============================================================
+# トリガー検出パターン（§7.2.1）
+# ============================================================
+
+# メンバー名指定パターン（v5.3追加）— より具体的なので先にチェック
+MEMBER_SUMMARY_PATTERNS = [
+    # 「〇〇さんの発言まとめて」
+    r"(.+?)(?:さん|くん|ちゃん)?の(?:発言|投稿|意見|コメント).*(?:まとめ|要約|整理)",
+    # 「〇〇さんと△△さんの会話まとめて」
+    r"(.+?)(?:さん|くん|ちゃん)?と(.+?)(?:さん|くん|ちゃん)?の(?:会話|議論|やりとり|やり取り).*(?:まとめ|要約|整理)",
+    # 「〇〇と△△の会話まとめて」（敬称なし）
+    r"(.+?)と(.+?)の(?:会話|議論|やりとり|やり取り|発言).*(?:まとめ|要約|整理)",
+]
 
 # 一般要約依頼パターン（v5.2から継続）
 SUMMARY_REQUEST_PATTERNS = [
-    r"(まとめ|要約|整理).*(?:して|お願い|欲しい|ほしい|くれ|ください)",
+    r"(まとめ|要約|整理).*(?:して|て|お願い|欲しい|ほしい|くれ|ください)",
     r"(?:して|お願い|欲しい|ほしい|くれ|ください).*(まとめ|要約|整理)",
 ]
 
-# メンバー名指定パターン（v5.3追加）
-# ⚠️ より具体的なパターン（複数名）を先にチェックする
-MEMBER_SUMMARY_PATTERNS = [
-    # 「〇〇さんと△△さんの会話まとめて」（複数名・敬称付き）
-    r"(.+?)(?:さん|くん|ちゃん)?と(.+?)(?:さん|くん|ちゃん)?の"
-    r"(?:会話|議論|やりとり|やり取り).*(?:まとめ|要約|整理)",
-    # 「〇〇と△△の会話まとめて」（複数名・敬称なし）
-    r"(.+?)と(.+?)の(?:会話|議論|やりとり|やり取り|発言)"
-    r".*(?:まとめ|要約|整理)",
-    # 「〇〇さんの発言まとめて」（単独名）
-    r"(.+?)(?:さん|くん|ちゃん)?の(?:発言|投稿|意見|コメント)"
-    r".*(?:まとめ|要約|整理)",
-]
 
+# ============================================================
+# LLMプロンプト（§7.6.3）
+# ============================================================
 
-# ===== LLMプロンプト（§7.6.3） =====
+MEMBER_SUMMARY_SYSTEM_PROMPT = (
+    "あなたは会話の要約を行うアシスタントです。"
+    "以下のルールに従ってください。"
+    "箇条書きは使わず、自然な文章でまとめること。"
+    "各メンバーの主な主張や意見を公平に扱うこと。"
+    "150〜300字程度でまとめること。"
+)
 
 MEMBER_SUMMARY_USER_PROMPT = """
 以下は{channel_name}での{member_names}の発言です。
@@ -59,14 +84,16 @@ MEMBER_SUMMARY_USER_PROMPT = """
 """
 
 
-# ===== 公開関数（§12.7.6） =====
+# ============================================================
+# 公開API（§12.7.6 インターフェース契約）
+# ============================================================
 
 
 def detect_summary_request(message_content: str) -> dict | None:
-    """メッセージが要約依頼かを判定する（§7.2.1, §12.7.6）
+    """要約依頼を検出し、対象メンバー名を抽出する
 
     Args:
-        message_content: [必須] メンション除去済みのメッセージ内容
+        message_content: メッセージ本文
 
     Returns:
         None: 要約依頼ではない
@@ -75,11 +102,11 @@ def detect_summary_request(message_content: str) -> dict | None:
         {"type": "member", "members": ["名前1", "名前2"]}: メンバー指定（複数）
 
     ⚠️ メンバー名指定パターンを先にチェックする（より具体的なパターン優先）
-    ⚠️ §12.4.2 形式に準拠
+    ⚠️ sync関数（§13: 正規表現マッチのみ、I/Oなし）
     """
     content = message_content
 
-    # メンバー名指定パターンを先にチェック（より具体的なパターン優先）
+    # Phase 1: メンバー名指定パターンを先にチェック（より具体的なパターン優先）
     for pattern in MEMBER_SUMMARY_PATTERNS:
         match = re.search(pattern, content)
         if match:
@@ -94,7 +121,7 @@ def detect_summary_request(message_content: str) -> dict | None:
             if members:
                 return {"type": "member", "members": members}
 
-    # 一般要約依頼チェック
+    # Phase 2: 一般要約依頼チェック
     for pattern in SUMMARY_REQUEST_PATTERNS:
         if re.search(pattern, content):
             return {"type": "general"}
@@ -104,360 +131,366 @@ def detect_summary_request(message_content: str) -> dict | None:
 
 def resolve_member_name(
     query: str,
-    guild_members: list,
+    guild_members: list[discord.Member],
     profile_data: dict | None = None,
-) -> list:
-    """クエリ文字列からDiscordメンバーを照合する（§7.3, §12.7.6）
+) -> list[discord.Member]:
+    """メンバー名を照合し、一致するメンバーを返す
+
+    N-07パターン: 4段階フォールバック照合
+    Q10決定（Option C）: 部分一致 + global_name/username両方検索
+
+    照合順序:
+        Phase 1: global_name 完全一致
+        Phase 2: username 完全一致
+        Phase 3: profile_data aliases 完全一致
+        Phase 4: global_name / username 部分一致（3文字以上のクエリのみ）
 
     Args:
-        query: [必須] 検索クエリ（敬称除去済み）
-        guild_members: [必須] guild.members（サーバーのメンバーリスト）
-        profile_data: [任意] members_extended.md から読み込んだプロファイル辞書
+        query: 検索クエリ（ユーザーが入力した名前）
+        guild_members: サーバーメンバーリスト（discord.Member のリスト）
+        profile_data: メンバープロファイル辞書（任意）
+            形式: {
+                "username": {
+                    "display_name": str,
+                    "notes": str,  # 旧表示名等が含まれる場合がある
+                },
+                ...
+            }
 
     Returns:
-        マッチしたメンバーのリスト（空リスト＝該当なし）
+        list[discord.Member]: 一致したメンバーリスト（上限3名: MAX_RESOLVE_RESULTS）
 
-    照合優先順位（§12.7.6 準拠）:
-        1. global_name（表示名）完全一致
-        2. username（ユーザー名）完全一致
-        3. members_extended.md のエイリアス完全一致
-        4. global_name（表示名）部分一致（contains）
-        5. username（ユーザー名）部分一致（contains）
-        6. nick（サーバーニックネーム）部分一致
-        7. profile_data 内の display_name / notes / aliases 部分一致
-
-    ⚠️ Bot自身は検索対象から除外する
-    ⚠️ 大文字小文字を区別しない（case-insensitive）
-    ⚠️ COMMON_MISTAKES N-07: 完全一致を部分一致より優先し、
-       「ろーる」で「ぴろーるん」がヒットする問題を軽減
+    ⚠️ sync関数（§13: リスト走査のみ、I/Oなし）
+    ⚠️ Bot ユーザーは除外する
+    ⚠️ 部分一致は3文字以上のクエリのみ（誤マッチ防止: §20）
     """
     query_lower = query.lower()
-    if not query_lower:
-        return []
-
-    # ===== Phase 1: 完全一致（exact match） =====
-
-    # 1. global_name 完全一致
-    for member in guild_members:
-        if member.bot:
-            continue
-        if (
-            member.global_name
-            and query_lower == member.global_name.lower()
-        ):
-            return [member]
-
-    # 2. username 完全一致
-    for member in guild_members:
-        if member.bot:
-            continue
-        if query_lower == member.name.lower():
-            return [member]
-
-    # 3. aliases 完全一致（profile_data から）
-    if profile_data:
-        for _key, profile in profile_data.items():
-            aliases = [a.lower() for a in profile.get("aliases", [])]
-            if query_lower in aliases:
-                uid = profile.get("user_id")
-                if uid:
-                    for member in guild_members:
-                        if str(member.id) == str(uid) and not member.bot:
-                            return [member]
-
-    # ===== Phase 2: 部分一致（partial / contains match） =====
-
     matches = []
+    seen_ids = set()
 
-    # 4. global_name 部分一致
-    for member in guild_members:
-        if member.bot:
-            continue
-        if (
-            member.global_name
-            and query_lower in member.global_name.lower()
-            and member not in matches
-        ):
+    def _add_if_new(member: discord.Member) -> bool:
+        """重複を防いで追加"""
+        if member.id not in seen_ids:
+            seen_ids.add(member.id)
             matches.append(member)
+            return True
+        return False
 
+    # Bot ユーザーを除外したリストを作成
+    human_members = [m for m in guild_members if not m.bot]
+
+    # Phase 1: global_name 完全一致
+    for member in human_members:
+        if member.global_name and member.global_name.lower() == query_lower:
+            _add_if_new(member)
     if matches:
-        return matches
+        return matches[:MAX_RESOLVE_RESULTS]
 
-    # 5. username 部分一致
-    for member in guild_members:
-        if member.bot:
-            continue
-        if (
-            query_lower in member.name.lower()
-            and member not in matches
-        ):
-            matches.append(member)
-
+    # Phase 2: username 完全一致
+    for member in human_members:
+        if member.name.lower() == query_lower:
+            _add_if_new(member)
     if matches:
-        return matches
+        return matches[:MAX_RESOLVE_RESULTS]
 
-    # 6. nick（サーバーニックネーム）部分一致
-    for member in guild_members:
-        if member.bot:
-            continue
-        if (
-            member.nick
-            and query_lower in member.nick.lower()
-            and member not in matches
-        ):
-            matches.append(member)
-
-    if matches:
-        return matches
-
-    # 7. profile_data 内の display_name / notes / aliases 部分一致
+    # Phase 3: profile_data aliases / notes 完全一致（§20: エイリアス対応）
     if profile_data:
-        for _key, profile in profile_data.items():
-            display = profile.get("display_name", "").lower()
-            notes = profile.get("notes", "").lower()
-            aliases = [a.lower() for a in profile.get("aliases", [])]
+        for username, profile in profile_data.items():
+            display_name = profile.get("display_name", "")
+            notes = profile.get("notes", "")
+            # display_name 完全一致
+            if display_name.lower() == query_lower:
+                for member in human_members:
+                    if member.name.lower() == username.lower():
+                        _add_if_new(member)
+            # notes に旧表示名が含まれている場合の完全一致チェック
+            if notes and query_lower in notes.lower():
+                for member in human_members:
+                    if member.name.lower() == username.lower():
+                        _add_if_new(member)
+        if matches:
+            return matches[:MAX_RESOLVE_RESULTS]
 
-            matched = (
-                query_lower in display
-                or query_lower in notes
-                or any(query_lower in alias for alias in aliases)
-            )
+    # Phase 4: 部分一致（3文字以上のクエリのみ — 誤マッチ防止）
+    if len(query) >= PARTIAL_MATCH_MIN_LENGTH:
+        for member in human_members:
+            # global_name 部分一致
+            if member.global_name and query_lower in member.global_name.lower():
+                _add_if_new(member)
+                continue
+            # username 部分一致
+            if query_lower in member.name.lower():
+                _add_if_new(member)
+                continue
+            # nick（サーバーニックネーム）部分一致
+            if member.nick and query_lower in member.nick.lower():
+                _add_if_new(member)
+                continue
 
-            if matched:
-                uid = profile.get("user_id")
-                if uid:
-                    for member in guild_members:
-                        if (
-                            str(member.id) == str(uid)
-                            and not member.bot
-                            and member not in matches
-                        ):
-                            matches.append(member)
-                            break
-
-    return matches
+    return matches[:MAX_RESOLVE_RESULTS]
 
 
 async def fetch_member_conversation(
-    channel,
+    channel: discord.TextChannel,
     member_ids: list[int],
-    limit: int = 100,
-) -> list:
-    """指定メンバーの会話を直近メッセージから抽出する（§7.4, §12.7.6）
+    limit: int = FETCH_LIMIT,
+) -> list[discord.Message]:
+    """指定メンバーの発言を取得する
+
+    Q8決定: 依頼があったチャンネルのみ
+    Q9決定: 直近100件
 
     Args:
-        channel: [必須] 検索対象チャンネル（discord.TextChannel）
-        member_ids: [必須] 対象メンバーのDiscord ID（1〜2名）
-        limit: [任意] 取得件数上限（デフォルト100 — Q9決定）
+        channel: 検索対象チャンネル
+        member_ids: 対象メンバーのID リスト
+        limit: 検索範囲のメッセージ数上限（デフォルト100）
 
     Returns:
-        対象メンバーのメッセージリスト（時系列順: 古い→新しい）
+        list[discord.Message]: 対象メンバーの発言リスト（時系列順）
 
-    ⚠️ channel.history() は新しい順に返すため、最後にソートが必要
-    ⚠️ Q8決定: 依頼があったチャンネルのみ検索（クロスチャンネル不可）
+    ⚠️ async関数（§13: channel.history() は async iterator）
     """
-    messages = []
+    member_id_set = set(member_ids)
+    conversations = []
 
-    async for msg in channel.history(limit=limit):
-        if msg.author.id in member_ids:
-            messages.append(msg)
+    try:
+        async for msg in channel.history(limit=limit):
+            if msg.author.id in member_id_set and not msg.author.bot:
+                conversations.append(msg)
+    except discord.Forbidden:
+        logger.error(
+            f"[DiscussionSummary] No permission to read history "
+            f"in {channel.name}"
+        )
+        return []
+    except Exception as e:
+        logger.error(
+            f"[DiscussionSummary] Failed to fetch history "
+            f"in {channel.name}: {e}"
+        )
+        return []
 
-    # 時系列順にソート（古い→新しい）
-    messages.sort(key=lambda m: m.created_at)
-
-    return messages
+    # 時系列順にソート（古い順）
+    conversations.reverse()
+    return conversations
 
 
 async def handle_member_summary(
-    message,
+    message: discord.Message,
     summary_request: dict,
-    member_profile_data: dict | None = None,
-    llm_client=None,
+    guild_members: list[discord.Member] | None = None,
+    profile_data: dict | None = None,
 ) -> str:
-    """メンバー名指定の会話要約を処理する（§7.5, §12.7.6）
-
-    Args:
-        message: [必須] トリガーとなったdiscord.Message
-        summary_request: [必須] detect_summary_request() の戻り値
-                         {"type": "member", "members": [...]}
-        member_profile_data: [任意] members_extended.md のプロファイル辞書
-        llm_client: [任意] Anthropic APIクライアント
-
-    Returns:
-        str — 要約テキスト（失敗時はフォールバックメッセージ）
+    """メンバー指定の要約を生成する
 
     処理フロー:
-        1. resolve_member_name() でメンバー特定
-        2. fetch_member_conversation() で会話取得
-        3. Sonnet で要約生成
-        4. 失敗時は Q1決定（Option B）に基づくフォールバック
+        1. メンバー名照合（resolve_member_name）
+        2. 発言取得（fetch_member_conversation）
+        3. 件数に応じたフォールバック（Q1決定: Option B）
+        4. LLM要約生成（Sonnet）
+        5. 📋フォーマットで返却
 
-    ⚠️ 要約出力は箇条書き禁止（COMMON_MISTAKES F-10, §27）
-    ⚠️ フォールバックは§7.5.2テンプレートの「意味」に沿いつつ
-       LLMがキャラクターに合わせて自然に生成する
+    Args:
+        message: 要約依頼メッセージ
+        summary_request: detect_summary_request() の戻り値
+            形式: {"type": "member", "members": ["名前1", "名前2"]}
+        guild_members: サーバーメンバーリスト（None時はguild.membersから取得）
+        profile_data: メンバープロファイル辞書（任意、resolve_member_nameに渡す）
+
+    Returns:
+        str: 要約テキスト（📋形式）またはエラーメッセージ
+
+    ⚠️ async関数（§13: channel.history + Sonnet API呼び出し）
+    ⚠️ N-05: 例外隔離 — 要約生成失敗は全体を止めない
     """
-    member_names = summary_request.get("members", [])
-    resolved_members = []
+    member_names_raw = summary_request.get("members", [])
+
+    # ---- Phase 1: メンバー名照合 ----
+    if guild_members is None:
+        guild_members = message.guild.members if message.guild else []
+
+    all_resolved = []
     unresolved_names = []
 
-    # Step 1: メンバー名を照合
-    for name in member_names:
-        try:
-            matches = resolve_member_name(
-                name,
-                message.guild.members,
-                member_profile_data,
-            )
-            if matches:
-                resolved_members.append(matches[0])  # 最初のマッチを採用
-            else:
-                unresolved_names.append(name)
-        except Exception as e:
-            logger.error(
-                f"[DiscussionSummary] Member resolve error "
-                f"for '{name}': {e}"
-            )
+    for name in member_names_raw:
+        resolved = resolve_member_name(name, guild_members, profile_data)
+        if resolved:
+            all_resolved.extend(resolved)
+        else:
             unresolved_names.append(name)
 
-    # 照合失敗があった場合（§7.5.2）
+    # 全員特定不可
+    if not all_resolved:
+        names_str = "、".join(member_names_raw)
+        return (
+            f"「{names_str}」さんを特定できませんでした。"
+            f"表示名やユーザー名で指定してみてください。"
+        )
+
+    # 一部特定不可の場合は注記付きで続行
+    partial_note = ""
     if unresolved_names:
-        names_str = "」「".join(unresolved_names)
-        return (
-            f"「{names_str}」さんが特定できませんでした。"
-            f"表示名かユーザー名で教えてもらえますか？"
-        )
+        unresolved_str = "、".join(unresolved_names)
+        partial_note = f"（※「{unresolved_str}」さんは特定できませんでした）\n\n"
 
-    # Step 2: 会話を取得
-    member_ids = [m.id for m in resolved_members]
-    try:
-        conversations = await fetch_member_conversation(
-            message.channel,
-            member_ids,
-            limit=100,
-        )
-    except Exception as e:
-        logger.error(
-            f"[DiscussionSummary] Conversation fetch error: {e}"
-        )
-        return (
-            "メッセージの取得中にエラーが発生しました。"
-            "少し経ってから再度お願いします。"
-        )
+    # ---- Phase 2: 発言取得 ----
+    member_ids = [m.id for m in all_resolved]
+    conversations = await fetch_member_conversation(
+        message.channel, member_ids
+    )
 
-    # Step 3: 件数に応じた処理（§7.5.1）
     count = len(conversations)
 
+    # 表示用メンバー名（敬称付き: §7.6.2）
+    display_names = []
+    for m in all_resolved:
+        name = m.global_name or m.name
+        display_names.append(f"{name}さん")
+    names_display = "と".join(display_names)
+
+    # ---- Phase 3: 件数に応じたフォールバック（Q1決定: Option B） ----
+
+    # 0件: 発言が見つからない
     if count == 0:
-        # 0件: 正直に不在を伝える（§7.5.2）
-        names_str = "さんと".join(
-            m.display_name for m in resolved_members
-        )
         return (
-            f"直近100件のメッセージの中で{names_str}さんの発言が"
+            partial_note
+            + f"{names_display}の発言が"
             f"見つかりませんでした。もう少し前の会話でしたか？"
         )
 
-    # 1件以上: 要約を生成（LLMに渡す）
-    context_text = _format_conversation_for_summary(conversations)
-    member_display_names = [
-        f"{m.display_name}さん" for m in resolved_members
-    ]
-    names_joined = "と".join(member_display_names)
+    # ---- Phase 4: LLM要約生成 ----
+    try:
+        summary_text = await _generate_summary_with_llm(
+            conversations, message.channel.name, names_display
+        )
+    except Exception as e:
+        # N-05: 要約生成失敗は独立して処理
+        logger.error(
+            f"[DiscussionSummary] LLM summary generation failed: {e}"
+        )
+        return (
+            partial_note
+            + f"{names_display}の発言が{count}件見つかりましたが、"
+            f"要約の生成中にエラーが発生しました。"
+            f"しばらくしてからもう一度お試しください。"
+        )
 
-    summary = await _generate_summary_with_llm(
-        channel_name=message.channel.name,
-        member_names=names_joined,
-        conversation_text=context_text,
-        llm_client=llm_client,
-    )
+    # ---- Phase 5: 出力フォーマット（§7.6.1） ----
 
+    # 1-2件: 注記付き部分要約
     if count <= 2:
-        # 少数: 注記を付加（§7.5.1）
         prefix = (
-            f"直近100件では{count}件しか見つかりませんでしたが、"
+            f"直近{FETCH_LIMIT}件では{count}件しか見つかりませんでしたが、"
             f"見つかった分をまとめますね。\n\n"
         )
-        return prefix + summary
+        formatted = _format_summary_output(
+            summary_text, names_display, FETCH_LIMIT, count
+        )
+        return partial_note + prefix + formatted
 
-    # §7.6.1 出力フォーマット
-    footer = f"\n\n対象: 直近100件中、{count}件の発言を元に作成"
-    return f"📋 会話まとめ（{names_joined}）\n\n{summary}{footer}"
+    # 3件以上: 通常の要約
+    formatted = _format_summary_output(
+        summary_text, names_display, FETCH_LIMIT, count
+    )
+    return partial_note + formatted
 
 
-# ===== 内部ヘルパー関数 =====
+# ============================================================
+# 内部ヘルパー関数
+# ============================================================
 
 
-def _format_conversation_for_summary(messages: list) -> str:
-    """メッセージリストをLLMに渡すテキスト形式に変換する
+def _format_conversation_for_summary(
+    conversations: list[discord.Message],
+) -> str:
+    """会話メッセージをLLMに渡すテキスト形式に変換する
 
     Args:
-        messages: discord.Message のリスト（時系列順）
+        conversations: メッセージリスト（時系列順）
 
     Returns:
-        フォーマット済みテキスト
+        str: フォーマット済み会話テキスト
+
+    ⚠️ §14: データフォーマット変換層 — 内部表現→API形式
     """
     lines = []
-    for msg in messages:
-        timestamp = msg.created_at.strftime("%H:%M")
-        author = msg.author.display_name
-        content = msg.content
-        if content:
-            lines.append(f"[{timestamp}] {author}: {content}")
+    for msg in conversations:
+        # 表示名を取得（global_name > name）
+        author_name = msg.author.global_name or msg.author.name
+        # メッセージ内容が空の場合（添付ファイルのみ等）はスキップ
+        content = msg.content.strip()
+        if not content:
+            continue
+        timestamp = msg.created_at.strftime("%m/%d %H:%M")
+        lines.append(f"[{timestamp}] {author_name}: {content}")
 
     return "\n".join(lines)
 
 
-async def _generate_summary_with_llm(
-    channel_name: str,
-    member_names: str,
-    conversation_text: str,
-    llm_client=None,
+def _format_summary_output(
+    summary_text: str,
+    names_display: str,
+    search_range: int,
+    hit_count: int,
 ) -> str:
-    """LLMを使って会話の要約を生成する（§7.6.3）
+    """要約出力を📋フォーマットで整形する（§7.6.1）
 
     Args:
-        channel_name: チャンネル名
-        member_names: メンバー名の文字列（「〇〇さんと△△さん」形式）
-        conversation_text: フォーマット済み会話テキスト
-        llm_client: Anthropic APIクライアント
+        summary_text: LLMが生成した要約テキスト
+        names_display: 表示用メンバー名（敬称付き）
+        search_range: 検索範囲のメッセージ数
+        hit_count: 該当メッセージ数
 
     Returns:
-        要約テキスト
-
-    ⚠️ Sonnet使用（品質重視）
-    ⚠️ 箇条書き禁止（COMMON_MISTAKES F-10）
-    ⚠️ 生成失敗時はフォールバックテキストを返す
+        str: 📋フォーマットの要約テキスト
     """
-    if llm_client is None:
-        logger.warning(
-            "[DiscussionSummary] LLM client not provided, "
-            "returning raw text"
-        )
-        return conversation_text[:300] + "..."
+    return (
+        f"📋 会話まとめ（{names_display}）\n\n"
+        f"{summary_text}\n\n"
+        f"対象: 直近{search_range}件中、{hit_count}件の発言を元に作成"
+    )
 
-    prompt = MEMBER_SUMMARY_USER_PROMPT.format(
+
+async def _generate_summary_with_llm(
+    conversations: list[discord.Message],
+    channel_name: str,
+    member_names: str,
+) -> str:
+    """LLM（Sonnet）を使って要約を生成する
+
+    Args:
+        conversations: 要約対象のメッセージリスト
+        channel_name: チャンネル名
+        member_names: 表示用メンバー名
+
+    Returns:
+        str: LLMが生成した要約テキスト
+
+    Raises:
+        Exception: API呼び出し失敗時（呼び出し元でN-05パターンで捕捉）
+
+    ⚠️ async関数（§13: AsyncAnthropic 使用必須）
+    ⚠️ COMMON_MISTAKES F-10: 箇条書き禁止をプロンプトで指示
+    """
+    conversation_text = _format_conversation_for_summary(conversations)
+
+    # 会話テキストが空の場合（content が空のメッセージのみだった場合）
+    if not conversation_text.strip():
+        return "テキストの発言が見つかりませんでした（画像やファイルのみの可能性があります）。"
+
+    user_prompt = MEMBER_SUMMARY_USER_PROMPT.format(
         channel_name=channel_name,
         member_names=member_names,
         conversation_text=conversation_text,
     )
 
-    try:
-        response = await llm_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=500,
-            temperature=0.3,  # 要約は低温度で正確に
-            messages=[{"role": "user", "content": prompt}],
-        )
-        summary = response.content[0].text.strip()
-        return summary
+    client = AsyncAnthropic()
 
-    except Exception as e:
-        logger.error(
-            f"[DiscussionSummary] LLM summary generation failed: {e}"
-        )
-        # フォールバック: LLM生成失敗時は会話の先頭部分を返す
-        return (
-            "要約の生成中にエラーが発生しました。"
-            "対象の会話は見つかっていますので、"
-            "少し経ってから再度お願いします。"
-        )
+    response = await client.messages.create(
+        model=MAIN_MODEL,
+        max_tokens=SUMMARY_MAX_TOKENS,
+        system=MEMBER_SUMMARY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    return response.content[0].text
