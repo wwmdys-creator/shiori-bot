@@ -20,10 +20,6 @@ F-14: クールダウンは CFR のみ、メンション/返信には影響し�
 v5.2-fix1: _handle_passive 例外が _handle_cfr をブロックしないよう分離
 v5.2-fix1: CFR登録ログを DEBUG→INFO に昇格（Railway診断用）
 
-v5.3-P0: get_heart_emoji デッド import 削除（trust_level_up から使っていなかった）
-v5.3-P1: _handle_heart_reaction にスコア読み取りタイミングレース修正
-         （record_interaction 完了後に trust_score を読む）
-
 依存: 全モジュール
 参照: interface_contract.md §2.1, event_flow.md 全体
 """
@@ -61,8 +57,6 @@ from reaction_handler import ReactionHandler
 from response_generator import ResponseConfig, ResponseGenerator
 
 # Phase 4/6: 昇格検出・予測ハイライト
-# P1修正: get_heart_emoji のデッド import を削除（bot.py内で未使用）
-# get_heart_emoji が必要な場合は config.py から直接 import すること
 from trust_level_up import TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS
 from prediction_highlighter import PredictionHighlighter
 
@@ -171,8 +165,9 @@ class ShioriBot(discord.Client):
         self.cfr_tracker = CFRTracker()
         self.cfr_analyzer = CFRAnalyzer(self.llm)
 
-        # ハートリアクション（既存 self.reactions とは独立）
-        self.heart_reactions = ReactionHandler()
+        # ハートリアクション（Haiku好意判定ベース）
+        # P0P1-v2: LLMClient を渡す（Haiku call_haiku に必要）
+        self.heart_reactions = ReactionHandler(self.llm)
 
         # 動的学習
         self.learning_detector = LearningDetector(self.llm)
@@ -738,6 +733,15 @@ class ShioriBot(discord.Client):
         await message.channel.send(cfr_response)
         self.cfr_tracker.mark_cfr_triggered(channel_id)
 
+        # P0P1-v2: CFRトリガーメッセージにハートリアクション（好意的なら）
+        try:
+            trust_score = self.trust.get_trust_score(message.author.id)
+            asyncio.create_task(
+                self.heart_reactions.handle_cfr_reaction(message, trust_score)
+            )
+        except Exception as e:
+            logger.warning(f"CFR heart reaction scheduling failed: {e}")
+
         logger.info(
             "CFR triggered: channel=%d, confidence=%.2f, type=%s",
             channel_id,
@@ -757,25 +761,18 @@ class ShioriBot(discord.Client):
     ) -> None:
         """F-12: ハートリアクション判定・付与。応答とは独立して実行される。
 
-        v5.3 §1: should_heart_react 3引数化に対応（is_mention_to_shiori 追加）。
-        v5.3 §4: handle_reaction() 統合フロー — 好感度レベル別ハートカラー。
-        v5.3 §10: delayed_add_reaction() 20秒遅延（handle_reaction内部で実行）。
-        asyncio.create_task() で呼び出されるため、例外を内部で処理する。
+        v5.3-P0P1-v2: Haiku好意判定ベースに変更。
+        check_favorability() の Haiku API 呼び出し分の遅延で
+        record_interaction() 完了後にスコアを読む形になるため、
+        明示的なsleepは不要。
 
-        P0-A1 hotfix: add_heart_reaction() → handle_reaction() に修正。
-        P1修正: スコア読み取り前に短い yield を追加。
-                on_message() → record_interaction() がスコアを更新した後に
-                trust_score を読み取ることで、ハートカラーの1メッセージ遅延を防止。
+        asyncio.create_task() で呼び出されるため、例外を内部で処理する。
         """
         try:
-            # P1修正: record_interaction()（_handle_mention内）にスコア更新の
-            # 機会を与える。リアクション自体は20秒遅延なので0.5秒は無視できる。
-            await asyncio.sleep(0.5)
-
             # trust_score を取得（§4: ハートカラー判定に必要）
             trust_score = self.trust.get_trust_score(message.author.id)
 
-            # handle_reaction() が should_heart_react + emoji選択 + 遅延付与を一括処理
+            # handle_reaction() が好意判定 + emoji選択 + 遅延付与を一括処理
             await self.heart_reactions.handle_reaction(
                 message=message,
                 trust_score=trust_score,

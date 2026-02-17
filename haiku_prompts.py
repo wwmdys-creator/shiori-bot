@@ -237,6 +237,22 @@ HaikuPromptRegistry.register(HaikuPrompt(
     output_type="json",
 ))
 
+# P0P1-v2: ハートリアクション好意判定（★新設）
+# Haiku で「栞に好意的か」を判定する。キーワードマッチ廃止。
+HaikuPromptRegistry.register(HaikuPrompt(
+    id="heart_favorability_check",
+    system=(
+        "あなたはDiscordボット「栞」への発言を分析します。\n"
+        "発言が栞に対して好意的・友好的・感謝・応援・共感を"
+        "示しているか判定してください。\n"
+        "中立的な質問や事務的な依頼は好意的とはみなしません。\n"
+        "JSON出力のみ: {\"is_favorable\": true/false}"
+    ),
+    user_template="発言: {message_content}",
+    max_tokens=30,
+    output_type="json",
+))
+
 
 # ===== プロファイル照合ヘルパー関数（§6.3） =====
 
