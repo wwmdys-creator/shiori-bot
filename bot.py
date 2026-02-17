@@ -174,6 +174,11 @@ class ShioriBot(discord.Client):
         # Haikuコンテキスト管理
         self.haiku_ctx = HaikuContextManager()
 
+        # ═══ v5.3 Phase 4/6: 昇格検出・予測ハイライト ═══
+        self.level_up_detector = TrustLevelUpDetector()
+        self.prediction_highlighter = PredictionHighlighter()
+        self.level_up_pending: dict[str, dict] = {}
+
     # ─── Discordイベントハンドラ ────────────────────────────
 
     async def on_ready(self) -> None:
@@ -204,7 +209,7 @@ class ShioriBot(discord.Client):
         member_count = len(self.member_profile.profiles)
         prediction_count = len(self.predictions.predictions)
         logger.info(
-            f"Shiori bot ready (v4.1+v5.2-fix1). "
+            f"Shiori bot ready (v4.1+v5.2+v5.3-hotfix1). "
             f"Loaded {member_count} members, {prediction_count} predictions. "
             f"CFR={'ON' if shiori_config.CFR_ENABLED else 'OFF'}"
         )
@@ -256,8 +261,9 @@ class ShioriBot(discord.Client):
         )
 
         # ── v5.2 F-12: ハートリアクション（応答とは独立して実行） ──
+        # v5.3 §1: is_mention も渡す（should_heart_react 3引数化対応）
         asyncio.create_task(
-            self._handle_heart_reaction(message, is_reply)
+            self._handle_heart_reaction(message, is_reply, is_mention)
         )
 
         # ── v5.2: 動的学習（バックグラウンド） ──
@@ -303,7 +309,17 @@ class ShioriBot(discord.Client):
         display_name = message.author.display_name
 
         # STEP 1: 信頼度記録
-        await self.trust.record_interaction(user_id, "mention")
+        interaction_result = await self.trust.record_interaction(user_id, "mention")
+
+        # Phase 4/6: 昇格チェック（N-05: 例外隔離）
+        try:
+            self.on_trust_score_change(
+                str(user_id),
+                interaction_result["old_score"],
+                interaction_result["new_score"],
+            )
+        except Exception as e:
+            logger.error(f"[LevelUp] on_trust_score_change failed: {e}")
 
         # STEP 2: チャンネル設定取得
         overrides = self.channel_config.get_overrides(message.channel.name)
@@ -363,7 +379,13 @@ class ShioriBot(discord.Client):
                 summary_text = self.llm.format_discussion_summary(t7_result)
                 await message.channel.send(summary_text)
                 await self.reactions.add_reaction(message, "discussion")
-                await self.trust.record_interaction(user_id, "summary_request")
+                sum_result = await self.trust.record_interaction(user_id, "summary_request")
+                try:
+                    self.on_trust_score_change(
+                        str(user_id), sum_result["old_score"], sum_result["new_score"],
+                    )
+                except Exception as e:
+                    logger.error(f"[LevelUp] on_trust_score_change failed: {e}")
             else:
                 error_msg = format_error_message("unknown")
                 await message.channel.send(error_msg)
@@ -405,7 +427,13 @@ class ShioriBot(discord.Client):
                 detection_method="reply" if is_reply else "mention",
             )
             if prediction_record:
-                await self.trust.record_interaction(user_id, "prediction")
+                pred_result = await self.trust.record_interaction(user_id, "prediction")
+                try:
+                    self.on_trust_score_change(
+                        str(user_id), pred_result["old_score"], pred_result["new_score"],
+                    )
+                except Exception as e:
+                    logger.error(f"[LevelUp] on_trust_score_change failed: {e}")
                 prediction_context = prediction_record
 
                 # STEP 7: プレモーテム生成（T6）
@@ -491,6 +519,24 @@ class ShioriBot(discord.Client):
                 f"\n\n[ナッジヒント]\n"
                 f"言及文: {nudge_hint.get('nudge_text', '')}\n"
                 f"→ 応答の末尾あたりにさりげなく織り込んでください"
+            )
+
+        # Phase 4/6: 昇格フラグ消費（§9.4, N-03/N-04）
+        level_up_info = self.level_up_pending.pop(str(user_id), None)
+        if level_up_info:
+            new_level = level_up_info["new_level"]
+            heart = get_heart_emoji(level_up_info["new_score"])
+            hint_prompts = LEVEL_UP_HINT_PROMPTS.get(new_level, "")
+            system_prompt += (
+                f"\n\n[昇格通知ヒント]\n"
+                f"このメンバーがLv{level_up_info['old_level']}→Lv{new_level}に昇格しました。\n"
+                f"ハート色: {heart}\n"
+                f"ヒント: {hint_prompts}\n"
+                f"→ お祝いの言葉を応答に自然に織り込んでください"
+            )
+            logger.info(
+                f"[LevelUp] Consumed pending for {user_id}: "
+                f"Lv{level_up_info['old_level']} -> Lv{new_level}"
             )
 
         # STEP 10: コンテキスト変換
@@ -630,17 +676,20 @@ class ShioriBot(discord.Client):
         self,
         message: discord.Message,
         is_reply_to_shiori: bool,
+        is_mention_to_shiori: bool,
     ) -> None:
         """F-12: ハートリアクション判定・付与。応答とは独立して実行される。
 
-        栞への好意的な返信（「ありがとう」「いいね」等）にハートを付ける。
+        v5.3 §1: should_heart_react 3引数化に対応（is_mention_to_shiori 追加）。
         asyncio.create_task() で呼び出されるため、例外を内部で処理する。
         """
         try:
             content = message.content or ""
             if not content:
                 return
-            if self.heart_reactions.should_heart_react(content, is_reply_to_shiori):
+            if self.heart_reactions.should_heart_react(
+                content, is_reply_to_shiori, is_mention_to_shiori
+            ):
                 await self.heart_reactions.add_heart_reaction(message)
         except Exception:
             logger.exception("Heart reaction handling error")
@@ -769,7 +818,7 @@ class ShioriBot(discord.Client):
 
         # 必須ファイル存在確認
         required_files = [
-            "data/members.md",
+            "data/members_seed.md",
             "data/predictions.md",
             "data/categories.md",
         ]
