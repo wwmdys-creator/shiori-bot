@@ -1,31 +1,20 @@
 """
-📎 栞（Shiori）v5.2 — カスタム例外
-Shiori_v5_2_Interface_Contract.md §9 に準拠
+📎 栞（Shiori）v5.3 — カスタム例外（リダイレクトモジュール）
+
+v5.3-P0P1-v3: ShioriError の重複定義を解消。
+  - errors.py の ShioriError（error_type引数付き）が正式定義
+  - 本ファイルは後方互換のため errors.py から再エクスポートするのみ
+  - ContextLimitExceeded, MemberNotFound, CFRContextExpired は
+    現在どこからも import されていないデッドコード（削除）
+
+旧定義（v5.2）:
+  exceptions.py: ShioriError(Exception) — 引数なし
+  errors.py:126: ShioriError(Exception) — error_type, detail 引数
+
+統合方針: errors.py 側を正とし、本ファイルは互換リダイレクトのみ残す。
 """
 
+# errors.py の ShioriError を再エクスポート（後方互換）
+from errors import ShioriError, LinkFetchError, TimeoutError, APILimitError
 
-class ShioriError(Exception):
-    """Shiori基底例外"""
-    pass
-
-
-class ContextLimitExceeded(ShioriError):
-    """コンテキスト文字数制限超過"""
-
-    def __init__(self, actual: int, limit: int):
-        self.actual = actual
-        self.limit = limit
-        super().__init__(f"Context limit exceeded: {actual} > {limit}")
-
-
-class MemberNotFound(ShioriError):
-    """メンバーが見つからない"""
-
-    def __init__(self, query: str):
-        self.query = query
-        super().__init__(f"Member not found: {query}")
-
-
-class CFRContextExpired(ShioriError):
-    """CFRコンテキスト期限切れ"""
-    pass
+__all__ = ["ShioriError", "LinkFetchError", "TimeoutError", "APILimitError"]

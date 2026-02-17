@@ -9,9 +9,12 @@ v5.2 既存定数 + v5.3 追加定数
         SEED_DIR/DATA_DIR 分離, resolve_data_path() 追加
   v5.3-P0: HEART_EMOJIS, get_heart_emoji() を集約
            （N-04: 三重重複の解消 — Single Source of Truth）
+  v5.3-P0P1-v3: SHIORI_KEYWORD_PATTERNS, contains_shiori_keyword() 追加
+                 （cfr.py DIRECT_MENTION_PATTERNS の SSoT化）
 """
 
 import os
+import re
 from pathlib import Path
 
 # =====================================================================
@@ -136,6 +139,37 @@ def get_heart_emoji(score: int) -> str:
         if low <= score <= high:
             return HEART_EMOJIS.get(level, "🧡")
     return "🧡"  # 範囲外は安全側
+
+
+# =====================================================================
+#  v5.3-P0P1-v3 栞キーワードパターン（SSoT: Single Source of Truth）
+# =====================================================================
+# cfr.py DIRECT_MENTION_PATTERNS と reaction_handler.py が共有参照する。
+# 新パターン追加時はここのみ更新すること。
+
+SHIORI_KEYWORD_PATTERNS: list[re.Pattern] = [
+    re.compile(r"栞", re.IGNORECASE),
+    re.compile(r"しおり", re.IGNORECASE),
+    re.compile(r"shiori", re.IGNORECASE),
+    re.compile(r"📎"),
+]
+
+
+def contains_shiori_keyword(text: str) -> bool:
+    """テキストに栞キーワードが含まれるか判定する。
+
+    CFRAnalyzer._check_direct_mention() と パッシブ言及ハート（経路C）
+    の両方が本関数を参照する（SSoT）。
+
+    Args:
+        text: 判定対象テキスト
+
+    Returns:
+        True: 栞キーワードを含む
+    """
+    if not text:
+        return False
+    return any(p.search(text) for p in SHIORI_KEYWORD_PATTERNS)
 
 
 # =====================================================================

@@ -1,6 +1,6 @@
 """
 リアクションハンドラモジュール — reaction_handler.py
-v5.3-P0P1-v2
+v5.3-P0P1-v3
 
 変更履歴:
   v5.3:        should_heart_react() 3引数化、遅延リアクション
@@ -10,6 +10,7 @@ v5.3-P0P1-v2
                  - should_heart_react() → check_favorability() に置換
                  - 確率30% → 好意的なら100%付与
                  - CFR向け handle_cfr_reaction() 追加
+  v5.3-P0P1-v3: handle_passive_mention_reaction() 追加（経路C）
 
 依存: config.py (REACTION_DELAY_SECONDS, get_heart_emoji)
       llm.py (LLMClient.call_haiku)
@@ -146,6 +147,36 @@ class ReactionHandler:
         schedule_delayed_reaction(message, emoji)
         logger.info(
             "ハートリアクション予約(CFR): msg=%s, emoji=%s, user=%s",
+            message.id, emoji, message.author.display_name,
+        )
+
+    async def handle_passive_mention_reaction(
+        self,
+        message: discord.Message,
+        trust_score: int,
+    ) -> None:
+        """パッシブ言及（条件D）へのハートリアクション（v5.3-P0P1-v3）
+
+        栞キーワードを含むが直接メンション/返信でないメッセージに対し、
+        Haiku好意判定→ハート付与を行う。テキスト応答は行わない。
+
+        前提: 呼び出し側（bot.py on_message else分岐）で以下を確認済み
+          - MAIN CHANNELカテゴリ内
+          - is_mention == False かつ is_reply == False
+          - contains_shiori_keyword(message.content) == True
+
+        Args:
+            message:     対象メッセージ
+            trust_score: メッセージ投稿者の好感度スコア
+        """
+        if not await self.check_favorability(message.content):
+            return
+
+        emoji = get_heart_emoji(trust_score)
+
+        schedule_delayed_reaction(message, emoji)
+        logger.info(
+            "ハートリアクション予約(パッシブ言及): msg=%s, emoji=%s, user=%s",
             message.id, emoji, message.author.display_name,
         )
 

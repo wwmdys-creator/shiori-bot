@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Shiori v5.2 unit tests"""
+"""Shiori v5.3-P0P1-v3 unit tests
+
+v5.3-P0P1-v2: Test 3 ReactionHandler → シグネチャ確認に変更
+              （should_heart_react 廃止、check_favorability は async）
+v5.3-P0P1-v3: Test 9 SSoT化対応、contains_shiori_keyword テスト追加
+"""
 import sys
 sys.path.insert(0, '.')
 
@@ -25,25 +30,20 @@ assert safe_parse_json('invalid') is None
 assert parse_with_default('invalid', {'x': 0}) == {'x': 0}
 print('safe_parse_json: OK')
 
-# Test 3: ReactionHandler
+# Test 3: ReactionHandler (v5.3-P0P1-v2 interface)
 from reaction_handler import ReactionHandler
-rh = ReactionHandler()
-# v5.3 §1: 3引数シグネチャが正常に動作すること
-# 確率的リアクション（30%）のため、True判定テストは複数回試行
-import random
-random.seed(12345)  # 再現性確保
-# 栞宛て（mention=True）かつキーワードマッチ → 確率で True（seed固定）
-result = rh.should_heart_react('栞すごい！', False, True)
-assert isinstance(result, bool), "should return bool"
-# 栞宛てでない → 常にFalse（確定的）
-assert rh.should_heart_react('栞すごい！', False, False) is False
-assert rh.should_heart_react('なるほど', False, False) is False
-# キーワードなし → 常にFalse（確定的）
-assert rh.should_heart_react('ただの発言', True, False) is False
-assert rh.should_heart_react('ただの発言', False, True) is False
-# reply=True かつキーワードマッチ → 確率でTrue
-result2 = rh.should_heart_react('なるほど', True, False)
-assert isinstance(result2, bool), "should return bool"
+# v5.3-P0P1-v2: コンストラクタに LLMClient 必須（Haiku好意判定用）
+# テスト時は None を渡す（check_favorability は非同期でここでは呼ばない）
+rh = ReactionHandler(None)
+# check_favorability は async なのでここではシグネチャ確認のみ
+import inspect
+assert inspect.iscoroutinefunction(rh.check_favorability), "check_favorability should be async"
+assert inspect.iscoroutinefunction(rh.handle_reaction), "handle_reaction should be async"
+assert inspect.iscoroutinefunction(rh.handle_cfr_reaction), "handle_cfr_reaction should be async"
+assert inspect.iscoroutinefunction(rh.handle_passive_mention_reaction), "handle_passive_mention_reaction should be async"
+# handle_reaction の引数数確認（self除外で4引数: message, trust_score, is_reply, is_mention）
+sig = inspect.signature(rh.handle_reaction)
+assert len(sig.parameters) == 4, f"handle_reaction should have 4 params, got {len(sig.parameters)}"
 print('ReactionHandler: OK')
 
 # Test 4: ResponseGenerator helpers
@@ -131,13 +131,22 @@ assert ld.has_trigger('転職しました') is True
 assert ld.has_trigger('おはよう') is False
 print('LearningDetector trigger: OK')
 
-# Test 9: CFRAnalyzer direct mention
+# Test 9: CFRAnalyzer direct mention (v5.3-P0P1-v3: config.py SSoT)
 from cfr import CFRAnalyzer
 analyzer = CFRAnalyzer(None)
 assert analyzer._check_direct_mention('栞さんありがとう') is True
 assert analyzer._check_direct_mention('しおりの言う通り') is True
 assert analyzer._check_direct_mention('ただの発言') is False
-print('CFRAnalyzer direct mention: OK')
+# SSoT確認: config.contains_shiori_keyword と同一結果
+from config import contains_shiori_keyword
+assert contains_shiori_keyword('栞ちゃんすごい') is True
+assert contains_shiori_keyword('しおりん最高') is True
+assert contains_shiori_keyword('Shioriの予測') is True
+assert contains_shiori_keyword('📎すごい') is True
+assert contains_shiori_keyword('ただの発言') is False
+assert contains_shiori_keyword('') is False
+assert contains_shiori_keyword(None) is False  # type: ignore
+print('CFRAnalyzer direct mention + contains_shiori_keyword: OK')
 
 # Test 10: Cooldown
 from cfr import CFRTracker as CT2

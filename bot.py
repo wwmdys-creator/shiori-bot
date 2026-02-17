@@ -1,13 +1,16 @@
-"""bot.py — 栞（Shiori）統合版 v4.1 + v5.2
+"""bot.py — 栞（Shiori）統合版 v4.1 + v5.2 + v5.3
 
 Discordイベント処理の統合ハンドラ。
 v4.1: T1-T8パイプライン、予測記録、ナッジ、リンク要約、議論要約
 v5.2: CFR、ハートリアクション、動的学習、Haiku最適化
+v5.3-P0P1-v3: N-04修正（昇格フラグ記録モード保護）、
+              パッシブ言及ハートリアクション（経路C）追加
 
 COMMON_MISTAKES §13: llm.py は AsyncAnthropic（非同期クライアント）を使用。
 COMMON_MISTAKES §10: NudgeManager(llm, member_profile) — 2引数必須。
 COMMON_MISTAKES §15: 全参照メソッドが実装済みであること。
 COMMON_MISTAKES §17: 変数スコープの検証済み。
+COMMON_MISTAKES N-04: 記録モード時は昇格フラグを消費せず再登録。
 
 v5.2 Anti-patterns:
 F-01: CFRTracker.is_active() で期限/回数/発動済みを一括チェック
@@ -65,6 +68,9 @@ from response_mode import determine_response_mode, has_prediction_content, _sile
 from discussion_summary import detect_summary_request as detect_member_summary, handle_member_summary
 from daily_maintenance import DailyMaintenanceTask
 from weekly_monologue import WeeklyMonologueTask
+
+# v5.3-P0P1-v3: パッシブ言及ハートリアクション
+from config import contains_shiori_keyword
 
 
 logger = logging.getLogger("shiori.bot")
@@ -237,7 +243,7 @@ class ShioriBot(discord.Client):
             user_id, old_score, new_score
         )
         if level_up_info is not None:
-            self.level_up_pending[user_id] = level_up_info
+            self.level_up_pending[str(user_id)] = level_up_info
             logger.info(
                 f"[LevelUp] Flag set for {user_id}: "
                 f"Lv{level_up_info['old_level']} -> Lv{level_up_info['new_level']}"
@@ -293,6 +299,21 @@ class ShioriBot(discord.Client):
                 await self._handle_passive(message)
             except Exception as e:
                 logger.warning(f"Passive monitor failed (non-fatal): {e}")
+
+            # ── v5.3-P0P1-v3: パッシブ言及ハートリアクション（条件D）──
+            # 栞キーワード含有 + MAINカテゴリ内 → Haiku好意判定 → ハート付与
+            if contains_shiori_keyword(message.content or ""):
+                try:
+                    category_id = getattr(message.channel.category, "id", None)
+                    if self.channel_config.is_main_channel_category(category_id):
+                        trust_score = self.trust.get_trust_score(message.author.id)
+                        asyncio.create_task(
+                            self.heart_reactions.handle_passive_mention_reaction(
+                                message, trust_score
+                            )
+                        )
+                except Exception as e:
+                    logger.warning(f"Passive mention heart reaction failed: {e}")
 
             # v5.2: CFR処理（F-14: CFR専用クールダウン、レート制限とは別）
             if shiori_config.CFR_ENABLED:
@@ -573,10 +594,12 @@ class ShioriBot(discord.Client):
             )
 
         # Phase 4/6: 昇格フラグ消費（§9.4, N-03/N-04）
-        # C-01修正: ResponseGeneratorに渡して応答モードに応じた処理を委譲
+        # N-03: pop() で取得と同時に削除（get()禁止）
+        # N-04: 記録モード時は昇格フラグを消費せず再登録
         level_up_hint_text = None
         level_up_info = self.level_up_pending.pop(str(user_id), None)
-        if level_up_info:
+        if level_up_info and response_mode == "free":
+            # 自由モード: 昇格演出を挿入
             new_level = level_up_info["new_level"]
             heart = level_up_info["new_heart"]
             hint_prompts = LEVEL_UP_HINT_PROMPTS.get(new_level, "")
@@ -590,6 +613,13 @@ class ShioriBot(discord.Client):
             logger.info(
                 f"[LevelUp] Consumed pending for {user_id}: "
                 f"Lv{level_up_info['old_level']} -> Lv{new_level}"
+            )
+        elif level_up_info and response_mode == "record":
+            # 記録モード: 昇格フラグを消費しない（次回の自由モードで演出）
+            self.level_up_pending[str(user_id)] = level_up_info
+            logger.info(
+                f"[LevelUp] Re-registered pending for {user_id} "
+                f"(record mode, deferred to next free mode)"
             )
 
         # STEP 10: コンテキスト変換

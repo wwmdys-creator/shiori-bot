@@ -3,6 +3,9 @@
 Shiori_v5_2_Interface_Contract.md §3.1, §3.2, §4 に準拠
 Shiori_v5_2_CFR_State_Machine.md に準拠
 
+v5.3-P0P1-v3: DIRECT_MENTION_PATTERNS を config.py に移動（SSoT化）
+              _check_direct_mention() → config.contains_shiori_keyword() 参照
+
 F-01: is_active() で期限・回数・発動済みを一括チェック
 F-02: 応答送信と mark_cfr_triggered() は必ずセット
 F-03: CFR応答は新しいCFRコンテキストを生成しない（bot.py側で制御）
@@ -10,7 +13,6 @@ F-13: remaining_checks はHaiku分析の「前に」同期的にデクリメン�
 """
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
@@ -22,6 +24,7 @@ from config import (
     CFR_MIN_CONFIDENCE,
     HAIKU_MAX_MESSAGE_CHARS,
     HAIKU_MAX_SUMMARY_CHARS,
+    contains_shiori_keyword,
 )
 from haiku_context import HaikuContextManager
 from haiku_prompts import parse_with_default
@@ -193,12 +196,8 @@ _TYPE_MAPPING: dict[str, tuple[str, str]] = {
 class CFRAnalyzer:
     """CFR関連性判定"""
 
-    DIRECT_MENTION_PATTERNS: list[re.Pattern] = [
-        re.compile(r"栞", re.IGNORECASE),
-        re.compile(r"しおり", re.IGNORECASE),
-        re.compile(r"shiori", re.IGNORECASE),
-        re.compile(r"📎"),
-    ]
+    # v5.3-P0P1-v3: DIRECT_MENTION_PATTERNS を config.py に移動（SSoT化）
+    # contains_shiori_keyword() を使用する。
 
     def __init__(self, llm_client: LLMClient) -> None:
         self._llm = llm_client
@@ -236,8 +235,8 @@ class CFRAnalyzer:
         return await self._analyze_implicit(shiori_summary, target_message)
 
     def _check_direct_mention(self, message: str) -> bool:
-        """直接言及の有無をチェック（正規表現）"""
-        return any(p.search(message) for p in self.DIRECT_MENTION_PATTERNS)
+        """直接言及の有無をチェック（config.py SSoT参照）"""
+        return contains_shiori_keyword(message)
 
     async def _analyze_implicit(
         self,
