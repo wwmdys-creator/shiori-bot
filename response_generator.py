@@ -230,6 +230,9 @@ class ResponseGenerator:
                     response_text, config.max_chars
                 )
 
+            # V-06: 非公開情報漏洩の事後フィルタリング（防御的プログラミング）
+            response_text = self._sanitize_sensitive_info(response_text)
+
             return response_text
 
         except Exception as e:
@@ -345,6 +348,28 @@ class ResponseGenerator:
             if last_pos > max_chars * 0.6:
                 return truncated[: last_pos + 1]
         return truncated[:max_chars]
+
+    def _sanitize_sensitive_info(self, text: str) -> str:
+        """非公開情報の漏洩を事後検出・除去する防御的フィルタ（V-06）
+
+        プロンプト指示が第一防衛線だが、万が一LLMが禁止フレーズを
+        生成した場合の最終防衛線として機能する。
+
+        Args:
+            text: LLMが生成した応答テキスト
+
+        Returns:
+            str: サニタイズ済みテキスト
+        """
+        # 数値スコア漏洩パターン
+        text = re.sub(r'スコア[はが]?\s*\d+', 'スコアは非公開', text)
+        text = re.sub(r'信頼度[はが]?\s*\d+', '信頼度についてはお答えできません', text)
+        # レベル明示パターン
+        text = re.sub(r'Lv\.?\s*\d+', '一定のレベル', text)
+        text = re.sub(r'レベル\s*\d+', '一定のレベル', text)
+        # Tier漏洩パターン
+        text = re.sub(r'Tier\s*[A-Da-d]', '（内部分類）', text)
+        return text
 
     def _fallback_response(self, response_mode: str) -> str:
         """API失敗時のフォールバック応答

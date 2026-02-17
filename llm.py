@@ -26,7 +26,7 @@ from pathlib import Path
 import anthropic
 from anthropic import AsyncAnthropic
 
-from config import ANTHROPIC_API_KEY, MAIN_MODEL, TIER1_MODEL, get_trust_label
+from config import ANTHROPIC_API_KEY, MAIN_MODEL, TIER1_MODEL
 from haiku_prompts import HaikuPrompt, HaikuPromptRegistry
 
 logger = logging.getLogger("shiori.llm")
@@ -219,9 +219,10 @@ class LLMClient:
             4: "敬語を残しつつ、砕けた表現を使って応答してください。",
         }
         tone_instruction = tone_map.get(trust_level, tone_map[1])
-        trust_label = get_trust_label(trust_level)
+        # V-01修正: 数値レベル・ラベルをLLMに渡さない（非公開情報漏洩防止）
+        # LLMはトーン指示のみで口調変化を十分に制御できる
         parts.append(
-            f"\n[信頼度レベル: {trust_level}（{trust_label}）]\n{tone_instruction}"
+            f"\n[口調指示]\n{tone_instruction}"
         )
 
         # 3. 対話相手のプロファイル

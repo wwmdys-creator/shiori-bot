@@ -603,12 +603,13 @@ class ShioriBot(discord.Client):
             new_level = level_up_info["new_level"]
             heart = level_up_info["new_heart"]
             hint_prompts = LEVEL_UP_HINT_PROMPTS.get(new_level, "")
+            # V-04修正: Lv数値をLLMに渡さない（非公開情報漏洩防止）
             level_up_hint_text = (
                 f"[昇格通知ヒント]\n"
-                f"このメンバーがLv{level_up_info['old_level']}→Lv{new_level}に昇格しました。\n"
+                f"このメンバーとの関係性が深まりました。\n"
                 f"ハート色: {heart}\n"
                 f"ヒント: {hint_prompts}\n"
-                f"→ お祝いの言葉を応答に自然に織り込んでください"
+                f"→ 関係の深まりを自然に1文で表現してください"
             )
             logger.info(
                 f"[LevelUp] Consumed pending for {user_id}: "

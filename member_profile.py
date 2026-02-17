@@ -110,14 +110,14 @@ class MemberProfileManager:
         parts = []
         for uid, profile in self._members.items():
             name = profile.get("display_name", uid)
-            tier = profile.get("tier", "?")
             expertise = profile.get("expertise", "")
             if compact:
-                parts.append(f"- {name}（Tier {tier}）: {expertise}")
+                # V-02修正: Tier情報をLLMに送信しない（非公開情報漏洩防止）
+                parts.append(f"- {name}: {expertise}")
             else:
                 lines = [f"## {name}"]
                 lines.append(f"- user_id: {uid}")
-                lines.append(f"- tier: {tier}")
+                # V-02修正: tier行を除去（非公開情報漏洩防止）
                 lines.append(f"- expertise: {expertise}")
                 position = profile.get("position", "")
                 if position:
@@ -153,7 +153,7 @@ class MemberProfileManager:
 
         name = profile.get("display_name", "")
         lines = [f"【メンバー情報: {name}】"]
-        lines.append(f"- Tier: {profile.get('tier', '?')}")
+        # V-03修正: Tier行を除去（非公開情報漏洩防止）
         lines.append(f"- 関心領域: {profile.get('expertise', '不明')}")
         notes = profile.get("notes", "")
         if notes:
@@ -213,9 +213,7 @@ class MemberProfileManager:
         parts = []
         name = profile.get("display_name", user_id)
         parts.append(name)
-        tier = profile.get("tier", "")
-        if tier:
-            parts.append(f"(Tier {tier})")
+        # V-02b修正: Tier情報をLLMに送信しない（非公開情報漏洩防止）
         expertise = profile.get("expertise", "")
         if expertise:
             parts.append(f"関心: {expertise}")
