@@ -60,6 +60,12 @@ from response_generator import ResponseConfig, ResponseGenerator
 from trust_level_up import TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS, get_heart_emoji
 from prediction_highlighter import PredictionHighlighter
 
+# Phase P1: v5.3 新モジュール統合
+from response_mode import determine_response_mode, has_prediction_content, _silent_record_prediction
+from discussion_summary import detect_summary_request as detect_member_summary, handle_member_summary
+from daily_maintenance import DailyMaintenanceTask
+from weekly_monologue import WeeklyMonologueTask
+
 
 logger = logging.getLogger("shiori.bot")
 
@@ -179,6 +185,10 @@ class ShioriBot(discord.Client):
         self.prediction_highlighter = PredictionHighlighter()
         self.level_up_pending: dict[str, dict] = {}
 
+        # ═══ P1: v5.3 定期タスク（§5, §8） ═══
+        self.daily_maintenance_task = DailyMaintenanceTask(self)
+        self.weekly_monologue_task = WeeklyMonologueTask(self)
+
     # ─── Discordイベントハンドラ ────────────────────────────
 
     async def on_ready(self) -> None:
@@ -209,7 +219,7 @@ class ShioriBot(discord.Client):
         member_count = len(self.member_profile.profiles)
         prediction_count = len(self.predictions.predictions)
         logger.info(
-            f"Shiori bot ready (v4.1+v5.2+v5.3-hotfix1). "
+            f"Shiori bot ready (v4.1+v5.2+v5.3-P0P1-hotfix). "
             f"Loaded {member_count} members, {prediction_count} predictions. "
             f"CFR={'ON' if shiori_config.CFR_ENABLED else 'OFF'}"
         )
@@ -336,8 +346,16 @@ class ShioriBot(discord.Client):
         # STEP 4.5: 特殊リクエスト判定
         content_lower = message.content.lower()
 
-        # 議論要約リクエスト？
-        is_summary_request = any(kw in content_lower for kw in SUMMARY_KEYWORDS)
+        # P1-5: v5.3 §7 メンバー指定要約の検出（legacy T7より先にチェック）
+        # メンション部分を除去してから判定
+        clean_content = re.sub(r'<@!?\d+>', '', message.content).strip()
+        member_summary_req = detect_member_summary(clean_content)
+
+        # 議論要約リクエスト？（legacy: 一般要約キーワード検出）
+        is_summary_request = (
+            (member_summary_req is not None)
+            or any(kw in content_lower for kw in SUMMARY_KEYWORDS)
+        )
 
         # リンク要約リクエスト？
         urls = URL_PATTERN.findall(message.content)
@@ -360,8 +378,34 @@ class ShioriBot(discord.Client):
             self.rate_limiter.record_response(message.channel.id)
             return
 
-        # ─── 議論要約フロー（T7）
+        # ─── 議論要約フロー（v5.3 §7 + legacy T7）
         if is_summary_request:
+            # P1-5: メンバー指定要約が検出された場合は §7 フローを優先
+            if member_summary_req and member_summary_req.get("type") == "member":
+                try:
+                    summary_text = await handle_member_summary(
+                        message=message,
+                        summary_request=member_summary_req,
+                        guild_members=message.guild.members if message.guild else None,
+                        profile_data=self.member_profile.profiles,
+                    )
+                    await message.channel.send(summary_text)
+                    await self.reactions.add_reaction(message, "discussion")
+                    sum_result = await self.trust.record_interaction(user_id, "summary_request")
+                    try:
+                        self.on_trust_score_change(
+                            str(user_id), sum_result["old_score"], sum_result["new_score"],
+                        )
+                    except Exception as e:
+                        logger.error(f"[LevelUp] on_trust_score_change failed: {e}")
+                except Exception as e:
+                    logger.error(f"[MemberSummary] Failed: {e}")
+                    error_msg = format_error_message("unknown")
+                    await message.channel.send(error_msg)
+                self.rate_limiter.record_response(message.channel.id)
+                return
+
+            # legacy T7: 一般要約フロー
             formatted_messages = "\n".join(
                 f"{m['author_display_name']}: {m['content']}"
                 for m in context_messages
@@ -398,6 +442,12 @@ class ShioriBot(discord.Client):
         )
         if community_knowledge:
             extra_context["community_knowledge"] = community_knowledge
+
+        # ─── P1-4: v5.3 §3 応答モード判定 ───
+        # メンション部分を除去してからモード判定
+        clean_for_mode = re.sub(r'<@!?\d+>', '', message.content).strip()
+        response_mode = determine_response_mode(clean_for_mode)
+        logger.info(f"[ResponseMode] user={display_name}, mode={response_mode}")
 
         # ─── STEP 5: 予測検出（T1）
         msg_dict = {
@@ -525,7 +575,9 @@ class ShioriBot(discord.Client):
         level_up_info = self.level_up_pending.pop(str(user_id), None)
         if level_up_info:
             new_level = level_up_info["new_level"]
-            heart = get_heart_emoji(level_up_info["new_score"])
+            # P0-A2 hotfix: check_level_up() は {"old_level","new_level","new_heart"} を返す
+            # "new_score" は存在しない → "new_heart"（既に絵文字文字列）を直接使用
+            heart = level_up_info["new_heart"]
             hint_prompts = LEVEL_UP_HINT_PROMPTS.get(new_level, "")
             system_prompt += (
                 f"\n\n[昇格通知ヒント]\n"
@@ -590,6 +642,16 @@ class ShioriBot(discord.Client):
 
         # STEP 14: レート制限記録
         self.rate_limiter.record_response(message.channel.id)
+
+        # P1-4: v5.3 §3 自由モード時の予測サイレント記録
+        # 自由モードで応答したが、予測的内容が含まれる場合は内部記録のみ行う
+        if response_mode == "free" and has_prediction_content(message.content):
+            asyncio.create_task(
+                _silent_record_prediction(
+                    message,
+                    record_callback=self._record_prediction_from_message,
+                )
+            )
 
     # ═══════════════════════════════════════════════════
     #  v5.2: CFR（Contextual Follow-up Response）処理
@@ -681,18 +743,63 @@ class ShioriBot(discord.Client):
         """F-12: ハートリアクション判定・付与。応答とは独立して実行される。
 
         v5.3 §1: should_heart_react 3引数化に対応（is_mention_to_shiori 追加）。
+        v5.3 §4: handle_reaction() 統合フロー — 好感度レベル別ハートカラー。
+        v5.3 §10: delayed_add_reaction() 20秒遅延（handle_reaction内部で実行）。
         asyncio.create_task() で呼び出されるため、例外を内部で処理する。
+
+        P0-A1 hotfix: add_heart_reaction() → handle_reaction() に修正。
         """
         try:
-            content = message.content or ""
-            if not content:
-                return
-            if self.heart_reactions.should_heart_react(
-                content, is_reply_to_shiori, is_mention_to_shiori
-            ):
-                await self.heart_reactions.add_heart_reaction(message)
+            # trust_score を取得（§4: ハートカラー判定に必要）
+            trust_score = self.trust.get_trust_score(message.author.id)
+
+            # handle_reaction() が should_heart_react + emoji選択 + 遅延付与を一括処理
+            await self.heart_reactions.handle_reaction(
+                message=message,
+                trust_score=trust_score,
+                is_reply_to_shiori=is_reply_to_shiori,
+                is_mention_to_shiori=is_mention_to_shiori,
+            )
         except Exception:
             logger.exception("Heart reaction handling error")
+
+    # ═══════════════════════════════════════════════════
+    #  P1-4: 予測サイレント記録ヘルパー
+    # ═══════════════════════════════════════════════════
+
+    async def _record_prediction_from_message(
+        self, message: discord.Message
+    ) -> None:
+        """自由モード時の予測サイレント記録コールバック（§3.3）。
+
+        _silent_record_prediction() の record_callback として渡される。
+        既存の predictions.record_prediction() に委譲する。
+        """
+        msg_dict = {
+            "user_id": message.author.id,
+            "display_name": message.author.display_name,
+            "content": message.content,
+            "timestamp": message.created_at.isoformat(),
+            "channel": message.channel.name,
+            "channel_category_id": getattr(
+                message.channel.category, "id", None
+            ),
+        }
+        t1_result = await self.passive_monitor.check_message(msg_dict)
+        if (
+            t1_result
+            and t1_result.get("is_prediction")
+            and t1_result.get("confidence", 0) >= 0.6
+        ):
+            await self.predictions.record_prediction(
+                message=msg_dict,
+                prediction_text=t1_result["prediction_text"],
+                detection_method="silent",
+            )
+            logger.info(
+                f"[SilentRecord] Prediction recorded for "
+                f"{message.author.display_name} (msg:{message.id})"
+            )
 
     # ═══════════════════════════════════════════════════
     #  v5.2: 動的学習処理
@@ -944,6 +1051,10 @@ class ShioriBot(discord.Client):
         # v5.2: CFRクリーンアップループ
         if shiori_config.CFR_ENABLED:
             self._cfr_cleanup.start()
+        # P1: v5.3 日次メンテナンス（§5）— 毎日18:00 JST
+        self._daily_maintenance_loop.start()
+        # P1: v5.3 週次モノローグ（§8）— 毎日21:00 JST（日曜のみ投稿）
+        self._weekly_monologue_loop.start()
 
     @tasks.loop(hours=24)
     async def _check_trust_decay(self) -> None:
@@ -991,6 +1102,51 @@ class ShioriBot(discord.Client):
 
     @_cfr_cleanup.before_loop
     async def _before_cfr_cleanup(self) -> None:
+        await self.wait_until_ready()
+
+    # ═══ P1: v5.3 日次メンテナンスタスク（§5） ═══
+
+    @tasks.loop(hours=24)
+    async def _daily_maintenance_loop(self) -> None:
+        """§5: 毎日18:00 JSTに日次メンテナンスを実行する。
+
+        P1 hotfix: DailyMaintenanceTask を起動し、結果を報告する。
+        例外は内部で隔離（N-05）。
+        """
+        try:
+            now = datetime.now(JST)
+            target_hour = shiori_config.DAILY_MAINTENANCE_HOUR
+            if now.hour != target_hour:
+                return
+            stats = await self.daily_maintenance_task.run_daily_maintenance()
+            await self.daily_maintenance_task.post_daily_report(stats)
+        except Exception:
+            logger.exception("[DailyMaintenance] Loop error (isolated)")
+
+    @_daily_maintenance_loop.before_loop
+    async def _before_daily_maintenance(self) -> None:
+        await self.wait_until_ready()
+
+    # ═══ P1: v5.3 週次モノローグタスク（§8） ═══
+
+    @tasks.loop(hours=24)
+    async def _weekly_monologue_loop(self) -> None:
+        """§8: 毎日21:00 JST起動、日曜日のみ投稿。
+
+        P1 hotfix: WeeklyMonologueTask を起動。
+        例外は内部で隔離（N-05）。
+        """
+        try:
+            now = datetime.now(JST)
+            target_hour = getattr(shiori_config, "MONOLOGUE_HOUR", 21)
+            if now.hour != target_hour:
+                return
+            await self.weekly_monologue_task.weekly_monologue_loop()
+        except Exception:
+            logger.exception("[WeeklyMonologue] Loop error (isolated)")
+
+    @_weekly_monologue_loop.before_loop
+    async def _before_weekly_monologue(self) -> None:
         await self.wait_until_ready()
 
 

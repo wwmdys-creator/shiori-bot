@@ -164,7 +164,7 @@ class WeeklyMonologueTask:
         )
 
         try:
-            response = await self.bot.llm_client.messages.create(
+            response = await self.bot.llm._client.messages.create(
                 model="claude-sonnet-4-5-20250929",
                 max_tokens=300,
                 temperature=0.8,  # 創造性を高めに設定
@@ -352,7 +352,7 @@ class WeeklyMonologueTask:
             return ["（テキスト発言なし）"]
 
         try:
-            response = await self.bot.llm_client.messages.create(
+            response = await self.bot.llm._client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=100,
                 temperature=0.3,
@@ -388,7 +388,7 @@ class WeeklyMonologueTask:
             注目予測のテキスト要約。なければ空文字列。
         """
         try:
-            all_predictions = self.bot.predictions.get_all_active()
+            all_predictions = self.bot.predictions.predictions
 
             recent = []
             for pred in all_predictions:

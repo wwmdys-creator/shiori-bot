@@ -16,6 +16,8 @@ COMMON_MISTAKES対応:
 import logging
 from datetime import datetime, timedelta, timezone
 
+import config as shiori_config
+
 logger = logging.getLogger("shiori.daily_maintenance")
 
 JST = timezone(timedelta(hours=9))
@@ -201,10 +203,9 @@ class DailyMaintenanceTask:
 
         today = datetime.now(tz=JST).strftime("%Y-%m-%d")
 
-        # 設定値取得（フォールバック付き）
-        bot_version = getattr(self.bot, "config", None)
-        version_str = getattr(bot_version, "BOT_VERSION", "5.3")
-        deploy_str = getattr(bot_version, "DEPLOY_DATE", "unknown")
+        # 設定値取得（configモジュールから直接）
+        version_str = getattr(shiori_config, "BOT_VERSION", "5.3")
+        deploy_str = getattr(shiori_config, "DEPLOY_DATE", "unknown")
 
         # 所感を生成（Haiku使用 — バックグラウンドタスク用）
         observation = await self._generate_observation(stats)
@@ -261,56 +262,73 @@ class DailyMaintenanceTask:
         return True
 
     def _is_already_recorded(self, message_id: int) -> bool:
-        """メッセージIDが既に予測として記録済みか確認する"""
+        """メッセージIDが既に予測として記録済みか確認する
+
+        P1 hotfix: predictions.is_recorded() は未実装。
+        predictions.predictions リスト内の message_id フィールドで簡易チェック。
+        """
         try:
-            return self.bot.predictions.is_recorded(message_id)
+            for pred in self.bot.predictions.predictions:
+                if pred.get("message_id") == message_id:
+                    return True
+            return False
         except Exception:
             return False
 
     async def _record_prediction(self, msg) -> None:
-        """予測を記録する（delegateパターン）"""
-        await self.bot.predictions.record_from_message(msg)
+        """予測を記録する（delegateパターン）
+
+        P1 hotfix: record_from_message() は未実装。
+        既存の record_prediction() に msg_dict を渡す。
+        """
+        msg_dict = {
+            "user_id": msg.author.id,
+            "display_name": msg.author.display_name,
+            "content": msg.content,
+            "timestamp": msg.created_at.isoformat(),
+            "channel": msg.channel.name,
+            "channel_category_id": getattr(
+                msg.channel.category, "id", None
+            ),
+        }
+        await self.bot.predictions.record_prediction(
+            message=msg_dict,
+            prediction_text=msg.content[:200],
+            detection_method="daily_scan",
+        )
 
     def _update_member_profile(self, msg) -> None:
         """メッセージからプロファイルを更新する
 
-        更新対象:
-            - last_active: メッセージのタイムスタンプ
-            - total_messages: インクリメント
+        P1 hotfix: update_activity() は未実装。
+        プロファイル辞書に直接 last_active を書き込む簡易処理。
         """
-        self.bot.member_profile.update_activity(
-            user_id=str(msg.author.id),
-            username=msg.author.name,
-            display_name=getattr(msg.author, "global_name", None)
-            or msg.author.display_name,
-            timestamp=msg.created_at,
-        )
+        user_id_str = str(msg.author.id)
+        profile = self.bot.member_profile.get_profile(user_id=msg.author.id)
+        if profile is not None:
+            profile["last_active"] = msg.created_at.isoformat()
+        # profile が None（未登録メンバー）の場合はスキップ
 
     async def _apply_trust_decay(self) -> int:
         """全メンバーに日次好感度減衰を適用する
 
         §2規定: 日次減衰にはTRUST_GAIN_MULTIPLIERを適用しない
 
+        P1 hotfix: get_all_profiles()/update_trust_score() は未実装。
+        trust.members を直接操作する。
+
         Returns:
             減衰を適用したメンバー数
         """
         count = 0
         try:
-            profiles = self.bot.member_profile.get_all_profiles()
-            for user_id, profile in profiles.items():
-                old_score = profile.get("trust_score", 0)
+            decay = getattr(shiori_config, "DAILY_TRUST_DECAY", -1)
+            for user_id, member_data in list(self.bot.trust.members.items()):
+                old_score = member_data.get("score", 0)
                 if old_score > 0:
-                    # 減衰値はconfig定数から取得（デフォルト: -1）
-                    decay = getattr(
-                        getattr(self.bot, "config", None),
-                        "DAILY_TRUST_DECAY",
-                        -1,
-                    )
                     new_score = max(0, old_score + decay)
                     if new_score != old_score:
-                        self.bot.member_profile.update_trust_score(
-                            user_id, new_score
-                        )
+                        member_data["score"] = new_score
                         count += 1
         except Exception as e:
             logger.error(f"[DailyMaintenance] Trust decay error: {e}")
@@ -319,12 +337,15 @@ class DailyMaintenanceTask:
     def _select_highlights(self, current_date: datetime) -> list[dict]:
         """PredictionHighlighterを呼び出してハイライトを選定する
 
+        P1 hotfix: get_all_active()/get_all_profiles() は未実装。
+        predictions.predictions と member_profile.profiles を直接使用。
+
         Returns:
             list[dict] — §12.4.3 形式
         """
         try:
-            predictions = self.bot.predictions.get_all_active()
-            member_profiles = self.bot.member_profile.get_all_profiles()
+            predictions = self.bot.predictions.predictions
+            member_profiles = self.bot.member_profile.profiles
 
             return self.highlighter.select_highlights(
                 predictions=predictions,
@@ -374,7 +395,7 @@ class DailyMaintenanceTask:
                 f"- メンバー名やスコアに言及しない\n"
             )
 
-            response = await self.bot.llm_client.messages.create(
+            response = await self.bot.llm._client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=200,
                 temperature=0.7,
