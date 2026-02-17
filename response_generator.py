@@ -65,6 +65,11 @@ FREE_MODE_INSTRUCTION = """
 自然な会話形式で応答してください。
 構造化フォーマット（📎記録形式や【カテゴリ】等）は使わないでください。
 栞のキャラクターが前面に出る、自然で温かい応答をしてください。
+
+【改行ルール】
+- 文と文の間に空行を入れないでください。改行のみで繋いでください。
+- 話題の転換やセクションの切れ目には「---」を単独の行として入れてください。
+- 「---」の前後にも空行は不要です。
 """
 
 
@@ -223,6 +228,7 @@ class ResponseGenerator:
             # F-10: 箇条書き除去（自由モード時のみ）
             if response_mode == "free":
                 response_text = self._remove_bullet_points(response_text)
+                response_text = self._format_free_mode_spacing(response_text)
 
             # F-07: 文字数チェック＆切り詰め
             if config.max_chars:
@@ -327,6 +333,41 @@ class ResponseGenerator:
             else:
                 cleaned.append(stripped)
         return "\n".join(cleaned)
+
+    def _format_free_mode_spacing(self, text: str) -> str:
+        """自由モード応答の行間を整形する
+
+        ルール:
+            1. 「---」行を空行1行に置換する
+            2. それ以外の空行はすべて除去する（行間詰め）
+
+        これにより、通常テキストは改行のみで連続し、
+        セクション区切り（元の---）の位置だけに空行が入る。
+
+        Args:
+            text: 応答テキスト
+
+        Returns:
+            str: 整形済みテキスト
+        """
+        # Phase 1: 「---」行を一時プレースホルダに置換
+        # 前後の空行も含めて正規化する
+        _PLACEHOLDER = "\x00SECTION_BREAK\x00"
+        result = re.sub(
+            r'\n*^-{2,}\s*$\n*',
+            _PLACEHOLDER,
+            text,
+            flags=re.MULTILINE,
+        )
+
+        # Phase 2: 残った空行（連続する改行）をすべて単一改行に圧縮
+        result = re.sub(r'\n{2,}', '\n', result)
+
+        # Phase 3: プレースホルダを空行1行（\n\n）に展開
+        result = result.replace(_PLACEHOLDER, '\n\n')
+
+        # 先頭・末尾の余計な空白を除去
+        return result.strip()
 
     def _truncate_response(self, text: str, max_chars: int) -> str:
         """応答を文末で切り詰める（F-07対策）
