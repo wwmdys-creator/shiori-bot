@@ -19,6 +19,9 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# P1-1: JST定義 — タイムスタンプ形式統一用
+JST = timezone(timedelta(hours=9))
+
 # ⚠️ V-01修正 + P0修正: config.py を単一参照元とする（COMMON_MISTAKES N-04）
 # HEART_EMOJIS, get_heart_emoji も config.py に集約済み
 from config import (
@@ -178,8 +181,8 @@ class TrustManager:
                 "user_id": user_id,
                 "display_name": f"Member#{user_id % 10000}",
                 "score": 0,
-                "last_active": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "join_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "last_active": datetime.now(JST).strftime("%Y-%m-%d"),
+                "join_date": datetime.now(JST).strftime("%Y-%m-%d"),
             }
 
         member = self.members[user_id]
@@ -191,7 +194,7 @@ class TrustManager:
         new_level = self._calculate_level(new_score)
 
         member["score"] = new_score
-        member["last_active"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        member["last_active"] = datetime.now(JST).strftime("%Y-%m-%d")
 
         logger.debug(
             f"[record_interaction] user={user_id}, action={action}, "
@@ -231,8 +234,8 @@ class TrustManager:
 
         try:
             last_active = datetime.strptime(last_active_str, "%Y-%m-%d")
-            last_active = last_active.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
+            last_active = last_active.replace(tzinfo=JST)
+            now = datetime.now(JST)
 
             if now - last_active > timedelta(days=DECAY_DAYS):
                 old_score = member.get("score", 0)
@@ -317,14 +320,14 @@ class TrustManager:
                 "user_id": user_id,
                 "display_name": display_name,
                 "score": 0,
-                "last_active": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "join_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "last_active": datetime.now(JST).strftime("%Y-%m-%d"),
+                "join_date": datetime.now(JST).strftime("%Y-%m-%d"),
             }
 
     def get_inactive_members(self, days: int = 30) -> list[dict]:
         """指定日数以上非活動のメンバーリストを返す。"""
         inactive = []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(JST)
         threshold = timedelta(days=days)
 
         for user_id, member in self.members.items():
@@ -333,7 +336,7 @@ class TrustManager:
                 continue
             try:
                 last_active = datetime.strptime(last_active_str, "%Y-%m-%d")
-                last_active = last_active.replace(tzinfo=timezone.utc)
+                last_active = last_active.replace(tzinfo=JST)
                 if now - last_active > threshold:
                     inactive.append(member)
             except ValueError:

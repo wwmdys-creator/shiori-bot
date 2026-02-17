@@ -31,7 +31,7 @@ import os
 import re
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import discord
 from discord.ext import tasks
@@ -1095,7 +1095,8 @@ class ShioriBot(discord.Client):
 
     def _start_background_tasks(self) -> None:
         """定期タスクを開始する。"""
-        self._check_trust_decay.start()
+        # P1-2修正: _check_trust_decay を削除。
+        # trust decay は daily_maintenance._apply_trust_decay() に集約。
         self._auto_save.start()
         # v5.2: CFRクリーンアップループ
         if shiori_config.CFR_ENABLED:
@@ -1105,24 +1106,10 @@ class ShioriBot(discord.Client):
         # P1: v5.3 週次モノローグ（§8）— 毎日21:00 JST（日曜のみ投稿）
         self._weekly_monologue_loop.start()
 
-    @tasks.loop(hours=24)
-    async def _check_trust_decay(self) -> None:
-        """毎日1回、30日以上非活動のメンバーに減衰を適用する。"""
-        now = datetime.now(JST)
-        for user_id in list(self.trust.members.keys()):
-            member_data = self.trust.members.get(user_id, {})
-            last_active_str = member_data.get("last_active", "")
-            if not last_active_str:
-                continue
-            try:
-                last_active = datetime.fromisoformat(last_active_str)
-                if last_active.tzinfo is None:
-                    last_active = last_active.replace(tzinfo=JST)
-                days_inactive = (now - last_active).days
-                if days_inactive >= 30 and days_inactive % 30 == 0:
-                    await self.trust.apply_decay(user_id)
-            except (ValueError, TypeError):
-                continue
+    # P1-2修正: _check_trust_decay を削除。
+    # 好感度減衰は daily_maintenance.py の _apply_trust_decay() に一元化。
+    # bot.py側の30日非活動-5pt減衰ロジックと daily_maintenance側の
+    # 毎日全員-1pt減衰が二重適用されていたバグを解消。
 
     @tasks.loop(minutes=30)
     async def _auto_save(self) -> None:
@@ -1141,10 +1128,6 @@ class ShioriBot(discord.Client):
         """v5.2: 期限切れCFRコンテキストの定期クリーンアップ。"""
         self.cfr_tracker.cleanup_expired()
 
-    @_check_trust_decay.before_loop
-    async def _before_trust_decay(self) -> None:
-        await self.wait_until_ready()
-
     @_auto_save.before_loop
     async def _before_auto_save(self) -> None:
         await self.wait_until_ready()
@@ -1155,18 +1138,15 @@ class ShioriBot(discord.Client):
 
     # ═══ P1: v5.3 日次メンテナンスタスク（§5） ═══
 
-    @tasks.loop(hours=24)
+    @tasks.loop(time=time(hour=18, minute=0, tzinfo=JST))
     async def _daily_maintenance_loop(self) -> None:
         """§5: 毎日18:00 JSTに日次メンテナンスを実行する。
 
-        P1 hotfix: DailyMaintenanceTask を起動し、結果を報告する。
+        P0-1修正: tasks.loop(hours=24) + 手動時刻判定 → time= 指定に変更。
+        discord.py が JST 18:00 に正確に起動する。
         例外は内部で隔離（N-05）。
         """
         try:
-            now = datetime.now(JST)
-            target_hour = shiori_config.DAILY_MAINTENANCE_HOUR
-            if now.hour != target_hour:
-                return
             stats = await self.daily_maintenance_task.run_daily_maintenance()
             await self.daily_maintenance_task.post_daily_report(stats)
         except Exception:
@@ -1178,18 +1158,15 @@ class ShioriBot(discord.Client):
 
     # ═══ P1: v5.3 週次モノローグタスク（§8） ═══
 
-    @tasks.loop(hours=24)
+    @tasks.loop(time=time(hour=21, minute=0, tzinfo=JST))
     async def _weekly_monologue_loop(self) -> None:
         """§8: 毎日21:00 JST起動、日曜日のみ投稿。
 
-        P1 hotfix: WeeklyMonologueTask を起動。
+        P0-1修正: tasks.loop(hours=24) + 手動時刻判定 → time= 指定に変更。
+        曜日判定は weekly_monologue_task 内部で実施。
         例外は内部で隔離（N-05）。
         """
         try:
-            now = datetime.now(JST)
-            target_hour = getattr(shiori_config, "MONOLOGUE_HOUR", 21)
-            if now.hour != target_hour:
-                return
             await self.weekly_monologue_task.weekly_monologue_loop()
         except Exception:
             logger.exception("[WeeklyMonologue] Loop error (isolated)")

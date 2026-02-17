@@ -17,9 +17,11 @@ COMMON_MISTAKES §14: predictions.md 内部表現と API フォーマットの�
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from config import APPROACHING_MONTHS, INACTIVE_DAYS, MAX_HIGHLIGHTS
+
+JST = timezone(timedelta(hours=9))
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +208,8 @@ class PredictionHighlighter:
                 continue
             try:
                 start_year = int(start)
-                # 開始年の1月1日を期限とみなす
-                deadline = datetime(start_year, 1, 1)
+                # 開始年の1月1日を期限とみなす（JST aware）
+                deadline = datetime(start_year, 1, 1, tzinfo=JST)
                 if current_date <= deadline <= threshold_date:
                     approaching.append(pred)
             except (ValueError, TypeError):
@@ -254,6 +256,10 @@ class PredictionHighlighter:
                     last_active = datetime.fromisoformat(last_active)
                 except (ValueError, TypeError):
                     continue
+
+            # timezone-naive → JST に統一（aware化）
+            if last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=JST)
 
             if last_active < inactive_threshold:
                 result.append(pred)

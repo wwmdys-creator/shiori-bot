@@ -102,6 +102,7 @@ REACTION_DELAY_SECONDS: int = 20
 # --- 日次メンテナンス（§5） ---
 DAILY_MAINTENANCE_HOUR: int = 18   # JST
 DAILY_MAINTENANCE_MINUTE: int = 0
+DAILY_TRUST_DECAY: int = -1        # 日次減衰量（§5 Step4: 全メンバーに毎日-1）
 
 # --- 週次独り言（§8） ---
 MONOLOGUE_DAY: int = 6       # calendar.SUNDAY（月曜=0, 日曜=6）

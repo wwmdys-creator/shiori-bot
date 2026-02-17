@@ -84,9 +84,10 @@ class DailyMaintenanceTask:
 
         Returns:
             dict — §12.4.4 形式の統計情報:
-                total_messages: スキャン件数
+                total_messages_scanned: スキャン件数
                 new_predictions: 新規予測数
-                updated_members: 更新メンバー数
+                profiles_updated: 更新メンバー数
+                memos_consolidated: 統合メモ数
                 highlights: list[dict] (§12.4.3 形式)
                 trust_decays_applied: 減衰適用数
 
@@ -94,9 +95,10 @@ class DailyMaintenanceTask:
         ⚠️ 日次減衰には TRUST_GAIN_MULTIPLIER を適用しない（§2規定）
         """
         stats = {
-            "total_messages": 0,
+            "total_messages_scanned": 0,
             "new_predictions": 0,
-            "updated_members": 0,
+            "profiles_updated": 0,
+            "memos_consolidated": 0,
             "highlights": [],
             "trust_decays_applied": 0,
         }
@@ -113,7 +115,7 @@ class DailyMaintenanceTask:
                     if msg.author.bot:
                         continue
 
-                    stats["total_messages"] += 1
+                    stats["total_messages_scanned"] += 1
 
                     # Step 2: 予測検出
                     try:
@@ -146,7 +148,7 @@ class DailyMaintenanceTask:
                 )
                 continue  # 1チャンネル失敗で全体を止めない
 
-        stats["updated_members"] = len(updated_member_ids)
+        stats["profiles_updated"] = len(updated_member_ids)
 
         # ===== Step 4: 好感度の日次減衰 =====
         try:
@@ -218,9 +220,10 @@ class DailyMaintenanceTask:
             f"📔 本日のフィールドノート整理（{today} 18:00）\n"
             f"Shiori v{version_str} ({deploy_str} deployed)\n\n"
             f"今日のサーバー活動: "
-            f"{stats.get('total_messages', 0)}件の投稿を確認しました。\n"
+            f"{stats.get('total_messages_scanned', 0)}件の投稿を確認しました。\n"
             f"新規予測記録: {stats.get('new_predictions', 0)}件追加\n"
-            f"プロファイル更新: {stats.get('updated_members', 0)}名分\n"
+            f"プロファイル更新: {stats.get('profiles_updated', 0)}名分\n"
+            f"動的メモ整理: {stats.get('memos_consolidated', 0)}件を統合・更新\n"
         )
 
         if highlight_text:
@@ -302,11 +305,16 @@ class DailyMaintenanceTask:
 
         P1 hotfix: update_activity() は未実装。
         プロファイル辞書に直接 last_active を書き込む簡易処理。
+
+        P1-1修正: タイムスタンプ形式を JST YYYY-MM-DD に統一。
+        trust.py の strptime("%Y-%m-%d") と整合させる。
         """
         user_id_str = str(msg.author.id)
         profile = self.bot.member_profile.get_profile(user_id=msg.author.id)
         if profile is not None:
-            profile["last_active"] = msg.created_at.isoformat()
+            # P1-1: UTC→JST変換し、trust.py と同じ YYYY-MM-DD 形式で記録
+            jst_dt = msg.created_at.replace(tzinfo=timezone.utc).astimezone(JST)
+            profile["last_active"] = jst_dt.strftime("%Y-%m-%d")
         # profile が None（未登録メンバー）の場合はスキップ
 
     async def _apply_trust_decay(self) -> int:
@@ -386,9 +394,9 @@ class DailyMaintenanceTask:
             prompt = (
                 f"以下の日次整理結果を踏まえて、"
                 f"2045年から来た研究者「栞」として1〜2文の短い所感を書いてください。\n"
-                f"投稿確認数: {stats.get('total_messages', 0)}件\n"
+                f"投稿確認数: {stats.get('total_messages_scanned', 0)}件\n"
                 f"新規予測: {stats.get('new_predictions', 0)}件\n"
-                f"プロファイル更新: {stats.get('updated_members', 0)}名\n\n"
+                f"プロファイル更新: {stats.get('profiles_updated', 0)}名\n\n"
                 f"条件:\n"
                 f"- 1〜2文で簡潔に\n"
                 f"- フィールドノートの走り書き風\n"
