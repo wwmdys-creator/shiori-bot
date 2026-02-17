@@ -7,6 +7,8 @@ v5.3: 好感度上昇量2倍化（§2）、ハートカラー連動（§4）、
       calculate_score_change() 追加（§12.5.1）、4段階レベル統合（§9.3.2）
 v5.3-Phase6: V-01修正 — HEART_THRESHOLDS/TRUST_GAIN_MULTIPLIER を
              config.py からインポートに統一（COMMON_MISTAKES N-04/CS-07）
+v5.3-P0: HEART_EMOJIS/get_heart_emoji も config.py に集約。
+         ローカル重複定義を削除（N-04: 三重重複解消）。
 
 参照: interface_contract.md §2.3, §6
       Shiori_v5_3_Detailed_Spec §2, §4, §9, §12.5.1
@@ -17,8 +19,13 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# ⚠️ V-01修正: config.py を単一参照元とする（COMMON_MISTAKES N-04, CS-07）
-from config import HEART_THRESHOLDS, TRUST_GAIN_MULTIPLIER
+# ⚠️ V-01修正 + P0修正: config.py を単一参照元とする（COMMON_MISTAKES N-04）
+# HEART_EMOJIS, get_heart_emoji も config.py に集約済み
+from config import (
+    HEART_THRESHOLDS,
+    TRUST_GAIN_MULTIPLIER,
+    get_heart_emoji,
+)
 
 logger = logging.getLogger("shiori.trust")
 
@@ -42,40 +49,19 @@ DECAY_AMOUNT = 5
 DECAY_DAYS = 30
 
 # ===== v5.3 定数（V-01修正後） =====
-
-# ⚠️ TRUST_GAIN_MULTIPLIER は config.py からインポート済み
-# ⚠️ HEART_THRESHOLDS は config.py からインポート済み
-# → ローカル定義は削除済み（V-01修正）
-
-# ハートカラーマッピング（§4.2）
-# ※ HEART_EMOJIS は trust.py 固有。Phase 2 で config.py に移動予定
-HEART_EMOJIS: dict[int, str] = {
-    1: "🧡",  # newbie
-    2: "💛",  # low
-    3: "💗",  # high
-    4: "❤️",  # max
-}
+# ⚠️ TRUST_GAIN_MULTIPLIER — config.py からインポート済み
+# ⚠️ HEART_THRESHOLDS      — config.py からインポート済み
+# ⚠️ HEART_EMOJIS          — config.py に集約済み（P0修正: ローカル定義削除）
+# ⚠️ get_heart_emoji()      — config.py に集約済み（P0修正: ローカル定義削除）
 
 
 # ============================================================
 # モジュールレベル関数（他モジュールからimport可能）
 # ============================================================
 
-def get_heart_emoji(score: int) -> str:
-    """スコアに対応するハート絵文字を返す（§4.2）。
-
-    trust_level_up.py, reaction_handler.py 等から参照される。
-
-    Args:
-        score: 信頼度スコア（0-100）
-
-    Returns:
-        str: ハート絵文字（🧡💛💗❤️のいずれか）
-    """
-    for level, (low, high) in HEART_THRESHOLDS.items():
-        if low <= score <= high:
-            return HEART_EMOJIS.get(level, "🧡")
-    return "🧡"  # 範囲外は安全側
+# P0修正: get_heart_emoji() は config.py からインポート済み。
+# 後方互換性のため `from trust import get_heart_emoji` は引き続き動作する
+# （config.py からの re-export として機能）。
 
 
 def calculate_score_change(action: str) -> int:

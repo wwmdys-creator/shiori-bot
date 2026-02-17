@@ -8,11 +8,14 @@ Error Pattern: N-03 (pop/get混同防止), N-04 (記録モード演出制御)
 COMMON_MISTAKES §10: bot.py から呼ばれるクラス名・メソッド名を厳密に一致させる。
 COMMON_MISTAKES §13: check_level_up() は sync 関数。LLM呼び出しなし。
 COMMON_MISTAKES §15: 全公開メソッドが実装済みであること。
+
+v5.3-P0: get_heart_emoji を config.py に集約（N-04: 三重重複解消）。
+         ローカル heart_map/get_heart_emoji を削除。
 """
 
 import logging
 
-from config import HEART_THRESHOLDS
+from config import HEART_THRESHOLDS, get_heart_emoji
 
 logger = logging.getLogger(__name__)
 
@@ -39,25 +42,9 @@ LEVEL_UP_HINT_PROMPTS: dict[int, str] = {
 }
 
 
-def get_heart_emoji(score: int) -> str:
-    """スコアからハートカラー絵文字を返す（§4.2 ハートカラーシステム）
-
-    Args:
-        score: 好感度スコア (0-100)
-
-    Returns:
-        str: ハート絵文字
-    """
-    heart_map = {
-        1: "🧡",  # newbie
-        2: "💛",  # low
-        3: "💗",  # high (§12.7.5 準拠)
-        4: "❤️",  # max
-    }
-    for level, (low, high) in HEART_THRESHOLDS.items():
-        if low <= score <= high:
-            return heart_map.get(level, "🧡")
-    return "🧡"  # 範囲外は安全側
+# P0修正: get_heart_emoji() は config.py に集約済み。
+# 後方互換性のため `from trust_level_up import get_heart_emoji` は
+# config.py からの re-export として引き続き動作する。
 
 
 class TrustLevelUpDetector:

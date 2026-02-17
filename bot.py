@@ -20,6 +20,10 @@ F-14: クールダウンは CFR のみ、メンション/返信には影響し�
 v5.2-fix1: _handle_passive 例外が _handle_cfr をブロックしないよう分離
 v5.2-fix1: CFR登録ログを DEBUG→INFO に昇格（Railway診断用）
 
+v5.3-P0: get_heart_emoji デッド import 削除（trust_level_up から使っていなかった）
+v5.3-P1: _handle_heart_reaction にスコア読み取りタイミングレース修正
+         （record_interaction 完了後に trust_score を読む）
+
 依存: 全モジュール
 参照: interface_contract.md §2.1, event_flow.md 全体
 """
@@ -57,7 +61,9 @@ from reaction_handler import ReactionHandler
 from response_generator import ResponseConfig, ResponseGenerator
 
 # Phase 4/6: 昇格検出・予測ハイライト
-from trust_level_up import TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS, get_heart_emoji
+# P1修正: get_heart_emoji のデッド import を削除（bot.py内で未使用）
+# get_heart_emoji が必要な場合は config.py から直接 import すること
+from trust_level_up import TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS
 from prediction_highlighter import PredictionHighlighter
 
 # Phase P1: v5.3 新モジュール統合
@@ -757,8 +763,15 @@ class ShioriBot(discord.Client):
         asyncio.create_task() で呼び出されるため、例外を内部で処理する。
 
         P0-A1 hotfix: add_heart_reaction() → handle_reaction() に修正。
+        P1修正: スコア読み取り前に短い yield を追加。
+                on_message() → record_interaction() がスコアを更新した後に
+                trust_score を読み取ることで、ハートカラーの1メッセージ遅延を防止。
         """
         try:
+            # P1修正: record_interaction()（_handle_mention内）にスコア更新の
+            # 機会を与える。リアクション自体は20秒遅延なので0.5秒は無視できる。
+            await asyncio.sleep(0.5)
+
             # trust_score を取得（§4: ハートカラー判定に必要）
             trust_score = self.trust.get_trust_score(message.author.id)
 

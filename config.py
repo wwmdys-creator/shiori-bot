@@ -7,6 +7,8 @@ v5.2 既存定数 + v5.3 追加定数
   v5.3: BOT_VERSION, TRUST_GAIN_MULTIPLIER, HEART_THRESHOLDS,
         REACTION_DELAY_SECONDS, DAILY/WEEKLY 定数,
         SEED_DIR/DATA_DIR 分離, resolve_data_path() 追加
+  v5.3-P0: HEART_EMOJIS, get_heart_emoji() を集約
+           （N-04: 三重重複の解消 — Single Source of Truth）
 """
 
 import os
@@ -81,6 +83,16 @@ HEART_THRESHOLDS: dict[int, tuple[int, int]] = {
     4: (80, 100),  # max    → ❤️
 }
 
+# --- ハートカラー絵文字マッピング（§4.2 — N-04: 単一参照元） ---
+# ⚠️ P0修正: trust.py, trust_level_up.py, reaction_handler.py の
+#    三重重複を解消。全モジュールはここを参照すること。
+HEART_EMOJIS: dict[int, str] = {
+    1: "🧡",  # newbie (Lv1: 0-19)
+    2: "💛",  # low    (Lv2: 20-49)
+    3: "💗",  # high   (Lv3: 50-79)
+    4: "❤️",  # max    (Lv4: 80-100)
+}
+
 # --- リアクション遅延（§10） ---
 REACTION_DELAY_SECONDS: int = 20
 
@@ -102,6 +114,28 @@ MAX_HIGHLIGHTS: int = 2       # ハイライト最大件数
 
 # --- 議論まとめ（§7） ---
 MEMBER_SUMMARY_FETCH_LIMIT: int = 100  # Q9決定: 直近100件取得
+
+
+# =====================================================================
+#  ハートカラー共通関数（N-04: 単一参照元）
+# =====================================================================
+
+def get_heart_emoji(score: int) -> str:
+    """スコアに対応するハート絵文字を返す（§4.2）
+
+    全モジュール共通の唯一の実装。trust.py, trust_level_up.py,
+    reaction_handler.py はこの関数を参照する。
+
+    Args:
+        score: 信頼度スコア（0-100）
+
+    Returns:
+        str: ハート絵文字（🧡💛💗❤️のいずれか）
+    """
+    for level, (low, high) in HEART_THRESHOLDS.items():
+        if low <= score <= high:
+            return HEART_EMOJIS.get(level, "🧡")
+    return "🧡"  # 範囲外は安全側
 
 
 # =====================================================================

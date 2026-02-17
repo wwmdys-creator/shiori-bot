@@ -4,11 +4,15 @@ v5.2 → v5.3 更新
 
 変更点:
   §1:  should_heart_react() 2引数 → 3引数（is_mention_to_shiori 追加）
-  §4:  get_heart_emoji() 追加 — 好感度レベル別ハートカラー
+  §4:  get_heart_emoji() — config.py の共通関数を使用
   §10: delayed_add_reaction() 追加 — 20秒遅延リアクション
   §10.10.2: schedule_delayed_reaction() 追加 — 安全ラッパー
 
-依存: config.py (HEART_THRESHOLDS, REACTION_DELAY_SECONDS)
+v5.3-P0: _HEART_EMOJIS / get_heart_emoji() をローカル定義から
+         config.py 集約に変更（N-04: 三重重複解消）。
+
+依存: config.py (HEART_THRESHOLDS, HEART_EMOJIS, REACTION_DELAY_SECONDS,
+                 get_heart_emoji)
 """
 
 import asyncio
@@ -18,22 +22,15 @@ import re
 
 import discord
 
-from config import HEART_THRESHOLDS, REACTION_DELAY_SECONDS
+from config import REACTION_DELAY_SECONDS, get_heart_emoji
 
 logger = logging.getLogger(__name__)
 
 # =====================================================================
-#  ハートカラーマッピング（§4 — HEART_THRESHOLDS 参照）
+#  P0修正: _HEART_EMOJIS は config.py の HEART_EMOJIS に集約済み
+#  get_heart_emoji() も config.py に集約済み
+#  → ローカル定義は削除（N-04: Single Source of Truth）
 # =====================================================================
-
-# ⚠️ COMMON_MISTAKES N-04: HEART_THRESHOLDS を単一参照元とする
-#    この辞書は HEART_THRESHOLDS のレベルキーに対応
-_HEART_EMOJIS: dict[int, str] = {
-    1: "🧡",   # newbie (0-19)
-    2: "💛",   # low    (20-49)
-    3: "💗",   # high   (50-79)
-    4: "❤️",   # max    (80-100)
-}
 
 
 # =====================================================================
@@ -59,7 +56,7 @@ class ReactionHandler:
 
     v5.3 変更点:
       - should_heart_react(): 3引数に拡張（§1）
-      - get_heart_emoji(): 好感度スコア別ハートカラー（§4）
+      - get_heart_emoji(): config.py の共通関数を使用（§4, P0修正）
       - delayed_add_reaction(): 20秒遅延リアクション（§10）
       - schedule_delayed_reaction(): 安全ラッパー（§10.10.2）
       - handle_reaction(): 統合フロー更新
@@ -100,26 +97,6 @@ class ReactionHandler:
 
         return False
 
-    def get_heart_emoji(self, trust_score: int) -> str:
-        """好感度スコアに応じたハート絵文字を返す（§4）
-
-        HEART_THRESHOLDS を参照してレベルを決定し、
-        対応する絵文字を返す。
-
-        Args:
-            trust_score: 好感度スコア（0-100）
-
-        Returns:
-            str: ハート絵文字（🧡 / 💛 / 💗 / ❤️）
-        """
-        # HEART_THRESHOLDS から該当レベルを検索
-        for level, (low, high) in HEART_THRESHOLDS.items():
-            if low <= trust_score <= high:
-                return _HEART_EMOJIS.get(level, "🧡")
-
-        # 範囲外 → デフォルト
-        return "🧡"
-
     async def handle_reaction(
         self,
         message: discord.Message,
@@ -133,6 +110,10 @@ class ReactionHandler:
           - is_mention_to_shiori 引数追加
           - schedule_delayed_reaction() 安全ラッパー経由に変更
           - 固定ハート → 好感度レベル別ハートカラー
+
+        v5.3-P0変更:
+          - get_heart_emoji() を config.py の共通関数に変更
+          - インスタンスメソッド self.get_heart_emoji() → config.get_heart_emoji()
 
         ⚠️ COMMON_MISTAKES N-01:
            delayed_add_reaction() は create_task() 経由でのみ呼び出す。
@@ -149,7 +130,8 @@ class ReactionHandler:
         ):
             return
 
-        emoji = self.get_heart_emoji(trust_score)
+        # P0修正: config.py の共通関数を使用
+        emoji = get_heart_emoji(trust_score)
 
         # ⚠️ N-01: schedule_delayed_reaction() 安全ラッパー経由（§10.10.2）
         schedule_delayed_reaction(message, emoji)

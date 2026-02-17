@@ -7,10 +7,17 @@
 v4.1変更: ✅（CHECKMARK）定数は存在しない。Q27凍結に伴い削除済み。
 v5.3変更: §10.3 — 全リアクション付与に20秒遅延を適用。
           add_reaction() 内部で schedule_delayed_reaction() を使用する。
+v5.3-P1: schedule_delayed_reaction のインライン import をトップレベルに移動。
+          reactions.py → reaction_handler.py に循環依存なし（検証済み）。
+          COMMON_MISTAKES §12: import残留をgrepで検出可能にする。
 """
 
 import logging
 from typing import TYPE_CHECKING
+
+# P1修正: インライン import をトップレベルに移動
+# 循環依存なし: reaction_handler.py は reactions.py を import していない
+from reaction_handler import schedule_delayed_reaction
 
 if TYPE_CHECKING:
     import discord
@@ -84,7 +91,7 @@ class ReactionManager:
 
         # v5.3 §10.3: 遅延付きリアクション（create_task経由）
         # ⚠️ COMMON_MISTAKES N-01: await直接呼出し禁止
-        from reaction_handler import schedule_delayed_reaction
+        # P1修正: トップレベル import に移動済み
         schedule_delayed_reaction(message, emoji)
         logger.debug(
             f"[add_reaction] Scheduled delayed {emoji} for message {message.id} "
@@ -130,6 +137,9 @@ class ReactionManager:
     ) -> None:
         """メッセージから絵文字リアクションを削除する。
 
+        ⚠️ P2候補: 現在呼び出し元なし（デッドコード）。
+           遅延リアクション削除のロジックも未実装。
+
         Args:
             message: discord.py の Message オブジェクト
             reaction_type: リアクション種別
@@ -163,6 +173,8 @@ class ReactionManager:
     @staticmethod
     def is_bookmark_emoji(emoji: str) -> bool:
         """ブックマーク（しおり）として扱う絵文字か判定する。
+
+        ⚠️ P2候補: 現在呼び出し元なし（デッドコード）。
 
         メンバーが📎や🔖をつけた場合は記録要求と解釈する。
 
