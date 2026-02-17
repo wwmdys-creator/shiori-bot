@@ -5,6 +5,8 @@
 v5.2: 基本的なスコア管理・レベル算出・減衰・匿名化
 v5.3: 好感度上昇量2倍化（§2）、ハートカラー連動（§4）、
       calculate_score_change() 追加（§12.5.1）、4段階レベル統合（§9.3.2）
+v5.3-Phase6: V-01修正 — HEART_THRESHOLDS/TRUST_GAIN_MULTIPLIER を
+             config.py からインポートに統一（COMMON_MISTAKES N-04/CS-07）
 
 参照: interface_contract.md §2.3, §6
       Shiori_v5_3_Detailed_Spec §2, §4, §9, §12.5.1
@@ -14,6 +16,9 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ⚠️ V-01修正: config.py を単一参照元とする（COMMON_MISTAKES N-04, CS-07）
+from config import HEART_THRESHOLDS, TRUST_GAIN_MULTIPLIER
 
 logger = logging.getLogger("shiori.trust")
 
@@ -36,23 +41,14 @@ SCORE_DELTAS = {
 DECAY_AMOUNT = 5
 DECAY_DAYS = 30
 
-# ===== v5.3 追加定数 =====
+# ===== v5.3 定数（V-01修正後） =====
 
-# 好感度2倍化（§2）
-# ⚠️ 上昇要因（正の値）にのみ適用。減衰（負の値）には適用しない
-TRUST_GAIN_MULTIPLIER: int = 2
-
-# ハートカラー閾値（§4.2, §9.3.2 で共有）
-# ⚠️ get_heart_emoji() と TrustLevelUpDetector.LEVEL_THRESHOLDS は
-#     この定数を共有参照しなければならない（COMMON_MISTAKES N-04対策）
-HEART_THRESHOLDS: dict[int, tuple[int, int]] = {
-    1: (0, 19),    # newbie → 🧡
-    2: (20, 49),   # low    → 💛
-    3: (50, 79),   # high   → 💗
-    4: (80, 100),  # max    → ❤️
-}
+# ⚠️ TRUST_GAIN_MULTIPLIER は config.py からインポート済み
+# ⚠️ HEART_THRESHOLDS は config.py からインポート済み
+# → ローカル定義は削除済み（V-01修正）
 
 # ハートカラーマッピング（§4.2）
+# ※ HEART_EMOJIS は trust.py 固有。Phase 2 で config.py に移動予定
 HEART_EMOJIS: dict[int, str] = {
     1: "🧡",  # newbie
     2: "💛",  # low
@@ -152,15 +148,6 @@ class TrustManager:
     def _parse_members_md(self, content: str) -> dict[int, dict]:
         """members.mdをパースしてメンバー辞書を返す。"""
         members = {}
-
-        # 各メンバーブロックをパース
-        # フォーマット例:
-        # ## user_id: 123456789
-        # - display_name: Rom🧄
-        # - score: 75
-        # - last_active: 2025-01-15
-        # - join_date: 2024-06-01
-
         pattern = r"## user_id: (\d+)\n((?:- .+\n?)+)"
         matches = re.findall(pattern, content)
 
@@ -200,7 +187,6 @@ class TrustManager:
             dict: {"old_score": int, "new_score": int,
                    "old_level": int, "new_level": int, "delta": int}
         """
-        # 新規メンバーの場合は初期化
         if user_id not in self.members:
             self.members[user_id] = {
                 "user_id": user_id,
@@ -214,19 +200,19 @@ class TrustManager:
         old_score = member.get("score", 0)
         old_level = self._calculate_level(old_score)
 
-        # v5.3: 倍率適用済みの変動値を取得（§2, §12.5.1）
         delta = calculate_score_change(action)
-        new_score = max(0, min(100, old_score + delta))  # 0〜100にクランプ
+        new_score = max(0, min(100, old_score + delta))
         new_level = self._calculate_level(new_score)
 
-        # 更新
         member["score"] = new_score
         member["last_active"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         logger.debug(
             f"[record_interaction] user={user_id}, action={action}, "
-            f"delta={delta} (base={SCORE_DELTAS.get(action, 0)}×{TRUST_GAIN_MULTIPLIER if delta > 0 else 1}), "
-            f"score: {old_score} -> {new_score}, level: {old_level} -> {new_level}"
+            f"delta={delta} (base={SCORE_DELTAS.get(action, 0)}×"
+            f"{TRUST_GAIN_MULTIPLIER if delta > 0 else 1}), "
+            f"score: {old_score} -> {new_score}, "
+            f"level: {old_level} -> {new_level}"
         )
 
         return {
@@ -241,15 +227,12 @@ class TrustManager:
         """30日非活動時の-5減衰を適用する（§6.3）。
 
         v5.3: TRUST_GAIN_MULTIPLIER は減衰には適用しない（§2規定）。
-        戻り値を追加し、昇格検出に利用可能にした。
 
         Args:
             user_id: Discord user ID
 
         Returns:
-            dict | None: 減衰が適用された場合は
-                {"old_score": int, "new_score": int} を返す。
-                適用されなかった場合は None。
+            dict | None: 減衰適用時は {"old_score", "new_score"} を返す。
         """
         if user_id not in self.members:
             return None
@@ -267,8 +250,7 @@ class TrustManager:
 
             if now - last_active > timedelta(days=DECAY_DAYS):
                 old_score = member.get("score", 0)
-                # ⚠️ 減衰にはTRUST_GAIN_MULTIPLIERを適用しない（§2）
-                new_score = max(0, old_score - DECAY_AMOUNT)  # 下限0
+                new_score = max(0, old_score - DECAY_AMOUNT)
                 member["score"] = new_score
                 logger.info(
                     f"[apply_decay] user={user_id}, "
@@ -282,56 +264,25 @@ class TrustManager:
         return None
 
     def get_trust_level(self, user_id: int) -> int:
-        """現在の信頼度レベル（1-4）を返す。
-
-        v5.3: 4段階に統合（v5.2の Lv5=100 は Lv4=80-100 に統合）。
-        未知ユーザーは1を返す。同期メソッド。
-
-        Args:
-            user_id: Discord user ID
-
-        Returns:
-            int: 信頼度レベル（1-4）
-        """
+        """現在の信頼度レベル（1-4）を返す。"""
         if user_id not in self.members:
             return 1
-
         score = self.members[user_id].get("score", 0)
         return self._calculate_level(score)
 
     def get_trust_score(self, user_id: int) -> int:
-        """現在の信頼度スコア（0-100）を返す。
-
-        未知ユーザーは0を返す。同期メソッド。
-
-        Args:
-            user_id: Discord user ID
-
-        Returns:
-            int: 信頼度スコア（0-100）
-        """
+        """現在の信頼度スコア（0-100）を返す。"""
         if user_id not in self.members:
             return 0
-
         return self.members[user_id].get("score", 0)
 
     def get_heart_emoji_for_user(self, user_id: int) -> str:
-        """ユーザーIDに対応するハート絵文字を返す（§4.2）。
-
-        Args:
-            user_id: Discord user ID
-
-        Returns:
-            str: ハート絵文字
-        """
+        """ユーザーIDに対応するハート絵文字を返す（§4.2）。"""
         score = self.get_trust_score(user_id)
         return get_heart_emoji(score)
 
     def _calculate_level(self, score: int) -> int:
         """スコアからレベルを算出する（v5.3 §4.2, §9.3.2）。
-
-        v5.3: v5.2の5段階から4段階に統合。
-        Lv5（score==100）はLv4（80-100）に統合された。
 
         | Lv | スコア範囲 | ハート |
         |----|-----------|--------|
@@ -339,34 +290,19 @@ class TrustManager:
         |  2 | 20〜49    | 💛     |
         |  3 | 50〜79    | 💗     |
         |  4 | 80〜100   | ❤️     |
-
-        Args:
-            score: 信頼度スコア（0-100）
-
-        Returns:
-            int: 信頼度レベル（1-4）
         """
         for level, (low, high) in HEART_THRESHOLDS.items():
             if low <= score <= high:
                 return level
-        return 1  # 範囲外は安全側にLv1
+        return 1
 
     async def anonymize_member(self, user_id: int) -> str:
-        """離脱メンバーの匿名化（Q26: B案）。
-
-        Args:
-            user_id: Discord user ID
-
-        Returns:
-            str: 匿名化後の名前（'元メンバー#NNN'）
-        """
+        """離脱メンバーの匿名化（Q26: B案）。"""
         anon_name = f"元メンバー#{user_id % 1000:03d}"
-
         if user_id in self.members:
             self.members[user_id]["display_name"] = anon_name
             self.members[user_id]["anonymized"] = "true"
             logger.info(f"[anonymize_member] user={user_id} -> {anon_name}")
-
         return anon_name
 
     async def save(self) -> None:
@@ -375,7 +311,6 @@ class TrustManager:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         lines = ["# メンバー台帳\n"]
-
         for user_id, member in sorted(self.members.items()):
             lines.append(f"## user_id: {user_id}")
             for key, val in member.items():
@@ -388,12 +323,7 @@ class TrustManager:
         logger.info(f"Saved {len(self.members)} members to {self.filepath}")
 
     def update_display_name(self, user_id: int, display_name: str) -> None:
-        """メンバーの表示名を更新する。
-
-        Args:
-            user_id: Discord user ID
-            display_name: 新しい表示名
-        """
+        """メンバーの表示名を更新する。"""
         if user_id in self.members:
             self.members[user_id]["display_name"] = display_name
         else:
@@ -406,14 +336,7 @@ class TrustManager:
             }
 
     def get_inactive_members(self, days: int = 30) -> list[dict]:
-        """指定日数以上非活動のメンバーリストを返す。
-
-        Args:
-            days: 非活動日数の閾値
-
-        Returns:
-            list[dict]: 非活動メンバーのリスト
-        """
+        """指定日数以上非活動のメンバーリストを返す。"""
         inactive = []
         now = datetime.now(timezone.utc)
         threshold = timedelta(days=days)
@@ -422,11 +345,9 @@ class TrustManager:
             last_active_str = member.get("last_active")
             if not last_active_str:
                 continue
-
             try:
                 last_active = datetime.strptime(last_active_str, "%Y-%m-%d")
                 last_active = last_active.replace(tzinfo=timezone.utc)
-
                 if now - last_active > threshold:
                     inactive.append(member)
             except ValueError:
