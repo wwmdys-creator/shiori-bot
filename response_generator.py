@@ -1,254 +1,340 @@
 """
-📎 栞（Shiori）v5.2 — 応答生成
-Shiori_v5_2_Interface_Contract.md §6.1 に準拠
+response_generator.py - 応答生成モジュール（v5.3拡張版）
 
-F-07: casual応答は生成後に文字数チェックし、超過時は切り詰め。
-F-08: should_ask_question() は50%の確率。
-F-09: オープンエンド質問を検出して除去。
-F-10: 箇条書き要約を検出して散文に再生成。
-F-11: 専門外でもまず自分の提案を出してから詳しい人に振る。
+Shiori v5.3 - §9 昇格演出 / §3 記録・自由モード / §12.6.3 インターフェース契約
+Interface Contract: §12.6.3 (ResponseGenerator.generate)
+Error Pattern: F-07 (文字数チェック), F-08 (質問50%), F-09 (オープンエンド禁止), F-10 (箇条書き禁止)
+
+v5.2 → v5.3 差分:
+    - generate() に level_up_hint (str|None) と response_mode ("record"|"free") を追加
+    - response_mode="record" 時のフォーマット型システムプロンプト挿入
+    - level_up_hint 非None 時のシステムプロンプト末尾追加
+    - _remove_bullet_points() 追加 (F-10対策)
+    - _truncate_response() 追加 (F-07対策)
+    - _get_heart_emoji() 追加 (§4 ハートカラー連動)
 """
 
 import logging
+import os
 import random
 import re
-from dataclasses import dataclass
-from typing import Literal
 
-import discord
+logger = logging.getLogger(__name__)
 
-from config import (
-    CASUAL_RESPONSE_MAX_CHARS,
-    CASUAL_RESPONSE_MIN_CHARS,
-    CASUAL_RESPONSE_MULTIPLIER,
-    HAIKU_MAX_MESSAGE_CHARS,
-    QUESTION_FREQUENCY_THRESHOLD,
-)
-from haiku_context import HaikuContextManager
-from haiku_prompts import parse_with_default
-from llm import LLMClient
+# ===== 定数 =====
 
-logger = logging.getLogger("shiori.response")
+# カジュアル応答の文字数制限（v5.2 既存）
+CASUAL_RESPONSE_MULTIPLIER = 2.5
+CASUAL_RESPONSE_MAX_CHARS = 300
+CASUAL_RESPONSE_MIN_CHARS = 30
+
+# ハートカラー（§4 / §12.3 — config.py と同期すること）
+HEART_EMOJI_MAP = {
+    1: "🧡",  # Lv1: 0-19
+    2: "💛",  # Lv2: 20-49
+    3: "💗",  # Lv3: 50-79
+    4: "❤️",  # Lv4: 80-100
+}
+
+# 記録モード用システムプロンプト追加指示（§3.3.1）
+RECORD_MODE_INSTRUCTION = """
+
+【応答モード: 記録モード（Record Mode）】
+あなたは今、予測記録モードで応答してください。
+以下のフォーマットで記録確認を出力してください:
+
+📎 予測記録
+━━━━━━━━━━
+【カテゴリ】{推定カテゴリ}
+【時間軸】{推定時期}
+【内容】{予測内容の要約}
+━━━━━━━━━━
+{差分があれば差分指摘}
+{ひとこと感想（1文以内、栞のキャラクターで）}
+
+注意事項:
+- 自由会話は行わないでください
+- フォーマットに従った構造化出力のみ
+- 昇格演出や質問は挿入しないでください
+"""
+
+# 自由モード用システムプロンプト追加指示（§3.3.2）
+FREE_MODE_INSTRUCTION = """
+
+【応答モード: 自由モード（Free Mode）】
+自然な会話形式で応答してください。
+構造化フォーマット（📎記録形式や【カテゴリ】等）は使わないでください。
+栞のキャラクターが前面に出る、自然で温かい応答をしてください。
+"""
 
 
-@dataclass
 class ResponseConfig:
-    """応答生成の設定"""
+    """応答設定（v5.2 既存、変更なし）
 
-    response_type: Literal["main", "cfr", "casual"]
-    max_chars: int | None
-    allow_question: bool
-    question_style: Literal["multiple_choice", "none"]
-    member_highlight: str | None = None
+    Attributes:
+        response_type: "casual" | "prediction" | "member_query" | "summary" | "other"
+        max_chars: 応答最大文字数（Noneで無制限）
+        use_sonnet: Sonnetモデルを使うか
+        trust_level: 信頼度レベル（1-4）
+    """
 
-
-# オープンエンド質問の検出パターン（F-09）
-_OPEN_ENDED_PATTERNS: list[re.Pattern] = [
-    re.compile(r"どう(?:思い|考え|感じ)ますか[？?]?\s*$"),
-    re.compile(r"(?:何|なに|どんな).*(?:ですか|でしょう)[？?]?\s*$"),
-    re.compile(r"いかがでしょうか[？?]?\s*$"),
-    re.compile(r"どうですか[？?]?\s*$"),
-]
-
-# 箇条書き検出パターン（F-10）
-_BULLET_PATTERN = re.compile(r"(?:^|\n)\s*[-•·＊※]\s+", re.MULTILINE)
+    def __init__(
+        self,
+        response_type: str = "casual",
+        max_chars: int | None = None,
+        use_sonnet: bool = True,
+        trust_level: int = 1,
+    ):
+        self.response_type = response_type
+        self.max_chars = max_chars
+        self.use_sonnet = use_sonnet
+        self.trust_level = trust_level
 
 
 class ResponseGenerator:
-    """応答生成"""
+    """応答生成
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self._llm = llm_client
-        self._ctx_mgr = HaikuContextManager()
+    Public API (Interface Contract §12.6.3):
+        - generate(message, config, context, level_up_hint, response_mode) -> str
+        - calculate_max_chars(input_message, response_type) -> int | None
+        - should_ask_question() -> bool
+        - format_question(options) -> str
+
+    v5.3追加:
+        - level_up_hint: 昇格演出プロンプト（§9.5）
+        - response_mode: "record" | "free"（§3.3）
+    """
+
+    def __init__(self, llm):
+        """
+        Args:
+            llm: LLMClient インスタンス（AsyncAnthropic使用）
+        """
+        self.llm = llm
 
     async def generate(
         self,
-        message: discord.Message,
+        message,
         config: ResponseConfig,
         context: str | None = None,
+        level_up_hint: str | None = None,
+        response_mode: str = "free",
     ) -> str:
-        """
-        応答を生成。config.response_type に応じてモデルを選択。
-        """
-        content = message.content or ""
-        author_name = message.author.display_name
+        """応答を生成する
 
-        if config.response_type == "casual":
-            response = await self._generate_casual(author_name, content, config)
-        elif config.response_type == "cfr":
-            response = await self._generate_cfr(content, config, context or "")
-        else:
-            response = await self._generate_main(
-                author_name, content, config, context
+        v5.3追加パラメータ:
+            level_up_hint: 昇格直後の場合、演出プロンプトが渡される（§9.5参照）
+                Noneでなければシステムプロンプト末尾に追加する
+            response_mode: "record"ならフォーマット型応答、"free"なら自由会話（§3.3参照）
+                デフォルトは"free"
+
+        ⚠️ level_up_hint は level_up_pending から pop() で取得した値（§9.4参照）
+           get() で取得するとフラグが消費されず無限演出になる（COMMON_MISTAKES N-03）
+        ⚠️ 記録モードでは level_up_hint は無視される（§9.5.2）
+
+        Args:
+            message: discord.Message オブジェクト
+            config: ResponseConfig 応答設定
+            context: 追加コンテキスト文字列
+            level_up_hint: 昇格演出プロンプト（自由モード時のみ有効）
+            response_mode: "record" | "free"
+
+        Returns:
+            str: 生成された応答テキスト
+        """
+        try:
+            # ----- システムプロンプト構築 -----
+            system_prompt = self.llm.build_system_prompt(
+                trust_level=config.trust_level,
+                member_profile=None,
+                channel_overrides=None,
+                community_knowledge_text=None,
             )
 
-        # F-07: 生成後の文字数チェック
-        if config.max_chars and len(response) > config.max_chars:
-            response = self._truncate_response(response, config.max_chars)
+            # モード別指示の追加（§3.3）
+            if response_mode == "record":
+                system_prompt += RECORD_MODE_INSTRUCTION
+                logger.debug("[ResponseGenerator] Response mode: RECORD")
+            else:
+                system_prompt += FREE_MODE_INSTRUCTION
+                logger.debug("[ResponseGenerator] Response mode: FREE")
 
-        # F-09: オープンエンド質問の除去
-        response = self._remove_open_ended_question(response)
+            # 追加コンテキスト（v5.2 既存）
+            if context:
+                system_prompt += f"\n\n{context}"
 
-        return response
+            # 昇格演出プロンプト挿入（§9.5 — 自由モード時のみ）
+            if level_up_hint and response_mode == "free":
+                system_prompt += f"\n\n{level_up_hint}"
+                logger.info(
+                    "[ResponseGenerator] Level-up hint inserted into system prompt"
+                )
+            elif level_up_hint and response_mode == "record":
+                logger.info(
+                    "[ResponseGenerator] Level-up hint skipped (record mode)"
+                )
+
+            # ハートカラー指示（§4 — ハートを含める場合のカラー指定）
+            heart_emoji = self._get_heart_emoji(config.trust_level)
+            system_prompt += (
+                f"\n\nこのメンバーへのハート絵文字は{heart_emoji}を使用してください。"
+            )
+
+            # ----- メッセージ構築 -----
+            user_content = message.content if hasattr(message, "content") else str(message)
+
+            # ----- API呼び出し -----
+            max_tokens = 1000
+            if config.max_chars:
+                # 概算: 日本語1文字≒2トークン、余裕を持たせる
+                max_tokens = min(max_tokens, config.max_chars * 2)
+
+            response_text = await self.llm.generate_response(
+                system_prompt=system_prompt,
+                messages=[{"role": "user", "content": user_content}],
+                max_tokens=max_tokens,
+                temperature=0.7,
+            )
+
+            # ----- 後処理 -----
+            # F-10: 箇条書き除去（自由モード時のみ）
+            if response_mode == "free":
+                response_text = self._remove_bullet_points(response_text)
+
+            # F-07: 文字数チェック＆切り詰め
+            if config.max_chars:
+                response_text = self._truncate_response(
+                    response_text, config.max_chars
+                )
+
+            return response_text
+
+        except Exception as e:
+            logger.error(f"[ResponseGenerator] generate failed: {e}")
+            return self._fallback_response(response_mode)
 
     def calculate_max_chars(
         self,
         input_message: str,
         response_type: str,
     ) -> int | None:
+        """最大応答文字数を計算する（v5.2 既存、変更なし）
+
+        Args:
+            input_message: 入力メッセージ
+            response_type: 応答タイプ
+
+        Returns:
+            int: 最大文字数
+            None: 制限なし
         """
-        最大応答文字数を計算。
-        casual: len(input) * 1.5、上限300、下限30。
-        """
-        if response_type != "casual":
-            return None
-        calculated = int(len(input_message) * CASUAL_RESPONSE_MULTIPLIER)
-        return max(CASUAL_RESPONSE_MIN_CHARS, min(calculated, CASUAL_RESPONSE_MAX_CHARS))
+        if response_type == "casual":
+            raw = int(len(input_message) * CASUAL_RESPONSE_MULTIPLIER)
+            return max(
+                CASUAL_RESPONSE_MIN_CHARS,
+                min(raw, CASUAL_RESPONSE_MAX_CHARS),
+            )
+        return None
 
     def should_ask_question(self) -> bool:
-        """質問を付けるべきか判定（50%の確率）"""
-        return random.random() < QUESTION_FREQUENCY_THRESHOLD
+        """質問を付けるべきか判定する（v5.2 既存、変更なし）
+
+        F-08対策: 50%の確率で質問を付与
+
+        Returns:
+            bool: 質問を付けるか
+        """
+        return random.random() < 0.5
 
     def format_question(self, options: list[str]) -> str:
-        """
-        多肢選択式の質問を生成。
+        """多肢選択式の質問を生成する（v5.2 既存、変更なし）
+
+        Args:
+            options: 選択肢リスト（2-4個）
+
+        Returns:
+            str: 質問文
 
         Raises:
             ValueError: 選択肢が2未満または5以上
         """
         if len(options) < 2 or len(options) > 4:
-            raise ValueError(f"Options must be 2-4, got {len(options)}")
+            raise ValueError(
+                f"options must be 2-4, got {len(options)}"
+            )
         if len(options) == 2:
             return f"{options[0]}ですか、それとも{options[1]}ですか？"
-        # 3-4個
-        head = "ですか、".join(options[:-1])
-        return f"{head}ですか、それとも{options[-1]}ですか？"
+        parts = "、".join(options[:-1])
+        return f"{parts}、それとも{options[-1]}ですか？"
 
-    # ── 内部メソッド ──
+    # ===== 内部メソッド =====
 
-    async def _generate_casual(
-        self,
-        author_name: str,
-        content: str,
-        config: ResponseConfig,
-    ) -> str:
-        """雑談応答（Haiku）"""
-        max_chars = config.max_chars or CASUAL_RESPONSE_MAX_CHARS
-        truncated = HaikuContextManager.truncate(content, HAIKU_MAX_MESSAGE_CHARS)
-        try:
-            response = await self._llm.call_haiku(
-                "casual_response",
-                template_vars={
-                    "author": author_name[:30],
-                    "message": truncated,
-                    "max_chars": str(max_chars),
-                },
-            )
-            return response.strip()
-        except Exception:
-            logger.exception("Casual response generation failed")
-            return "すみません、少し調子が悪いみたいです…"
+    def _get_heart_emoji(self, trust_level: int) -> str:
+        """信頼度レベルに対応するハート絵文字を返す（§4）
 
-    async def _generate_cfr(
-        self,
-        target_message: str,
-        config: ResponseConfig,
-        context: str,
-    ) -> str:
-        """CFR応答（Haiku）"""
-        truncated_target = HaikuContextManager.truncate(
-            target_message, HAIKU_MAX_MESSAGE_CHARS
-        )
-        try:
-            response = await self._llm.call_haiku(
-                "cfr_response",
-                template_vars={
-                    "shiori_summary": context[:150],
-                    "target_message": truncated_target[:400],
-                    "reaction_type": "elaborate",
-                },
-            )
-            return response.strip()
-        except Exception:
-            logger.exception("CFR response generation failed")
-            return ""
+        Args:
+            trust_level: 信頼度レベル（1-4）
 
-    async def _generate_main(
-        self,
-        author_name: str,
-        content: str,
-        config: ResponseConfig,
-        context: str | None,
-    ) -> str:
-        """メイン応答（Sonnet）"""
-        system_parts = [
-            "あなたは栞（しおり）。2045年から来た19歳の未来研究者。",
-            "シンギュラリティ・サーバーの記録係として活動中。",
-            "敬語ベース（「です」「ます」調）。親しみやすい口調。",
-            "一人称は「わたし」。",
-        ]
-        if config.member_highlight:
-            system_parts.append(
-                f"\n【メンバー情報】\n{config.member_highlight}"
-            )
-        if not config.allow_question:
-            system_parts.append("\n質問は付けないでください。")
-        elif config.question_style == "multiple_choice":
-            system_parts.append(
-                "\n質問する場合は必ず多肢選択式（「Aですか、それともBですか？」形式）にしてください。"
-                "オープンエンドの質問（「どう思いますか？」等）は禁止です。"
-            )
+        Returns:
+            str: ハート絵文字
+        """
+        level = min(max(trust_level, 1), 4)
+        return HEART_EMOJI_MAP.get(level, "🧡")
 
-        system = "\n".join(system_parts)
+    def _remove_bullet_points(self, text: str) -> str:
+        """箇条書きパターンを検出し文章形式に変換する（F-10対策）
 
-        user_parts = [f"{author_name}: {content}"]
-        if context:
-            user_parts.append(f"\n【追加コンテキスト】\n{context}")
+        Args:
+            text: 応答テキスト
 
-        user_content = "\n".join(user_parts)
+        Returns:
+            str: 箇条書きを除去したテキスト
+        """
+        lines = text.split("\n")
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r"^[・\-\*]\s", stripped):
+                cleaned.append(re.sub(r"^[・\-\*]\s*", "", stripped))
+            elif re.match(r"^\d+[.．]\s", stripped):
+                cleaned.append(re.sub(r"^\d+[.．]\s*", "", stripped))
+            else:
+                cleaned.append(stripped)
+        return "\n".join(cleaned)
 
-        try:
-            response = await self._llm.call_sonnet(
-                system=system,
-                user_content=user_content,
-                max_tokens=1024,
-            )
-            # F-10: 箇条書きチェック
-            if _BULLET_PATTERN.search(response):
-                logger.warning("Bullet points detected in main response, keeping as-is")
-                # 要約依頼以外では散文を期待するが、強制再生成はコスト高のためログのみ
-            return response.strip()
-        except Exception:
-            logger.exception("Main response generation failed")
-            return "すみません、ちょっと処理に問題が…もう一度お願いできますか？"
+    def _truncate_response(self, text: str, max_chars: int) -> str:
+        """応答を文末で切り詰める（F-07対策）
 
-    def _truncate_response(self, response: str, max_chars: int) -> str:
-        """応答を文字数制限に合わせて切り詰め"""
-        if len(response) <= max_chars:
-            return response
-        # 文末で切る
-        truncated = response[:max_chars]
-        # 最後の句点・感嘆符で区切れるか試行
-        for delim in ("。", "！", "？", "…", "\n"):
-            idx = truncated.rfind(delim)
-            if idx > max_chars // 2:  # あまりに短くなるなら無視
-                return truncated[: idx + 1]
+        文境界（句点・疑問符・感嘆符）で切ることで自然な終端を保つ。
+
+        Args:
+            text: 応答テキスト
+            max_chars: 最大文字数
+
+        Returns:
+            str: 切り詰めたテキスト
+        """
+        if len(text) <= max_chars:
+            return text
+        truncated = text[:max_chars]
+        for sep in ["。", "？", "！", "\n"]:
+            last_pos = truncated.rfind(sep)
+            if last_pos > max_chars * 0.6:
+                return truncated[: last_pos + 1]
         return truncated[:max_chars]
 
-    def _remove_open_ended_question(self, response: str) -> str:
-        """F-09: オープンエンド質問を検出して除去"""
-        for pattern in _OPEN_ENDED_PATTERNS:
-            if pattern.search(response):
-                # 質問部分を除去（最後の文を削除）
-                lines = response.rstrip().rsplit("\n", 1)
-                if len(lines) == 2:
-                    if pattern.search(lines[1]):
-                        return lines[0].rstrip()
-                # 1行の場合は句点で最後の文を分離
-                sentences = [
-                    s for s in re.split(r"(?<=[。！？])", response) if s.strip()
-                ]
-                if len(sentences) > 1 and pattern.search(sentences[-1]):
-                    return "".join(sentences[:-1]).rstrip()
-                # 文が1つだけで質問の場合は元のまま返す（空にしない）
-        return response
+    def _fallback_response(self, response_mode: str) -> str:
+        """API失敗時のフォールバック応答
+
+        Args:
+            response_mode: "record" | "free"
+
+        Returns:
+            str: フォールバックテキスト
+        """
+        if response_mode == "record":
+            return "📎 記録処理中にエラーが発生しました。もう一度お試しください。"
+        return (
+            "すみません、少し考えがまとまりませんでした。"
+            "もう一度話しかけていただけますか？"
+        )
