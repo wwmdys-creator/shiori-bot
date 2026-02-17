@@ -26,7 +26,7 @@ from pathlib import Path
 import anthropic
 from anthropic import AsyncAnthropic
 
-from config import ANTHROPIC_API_KEY, MAIN_MODEL, TIER1_MODEL
+from config import ANTHROPIC_API_KEY, MAIN_MODEL, TIER1_MODEL, get_trust_label
 from haiku_prompts import HaikuPrompt, HaikuPromptRegistry
 
 logger = logging.getLogger("shiori.llm")
@@ -189,7 +189,7 @@ class LLMClient:
         コミュニティ知識を動的に注入する。
 
         Args:
-            trust_level: 対話相手の信頼度レベル（1-5）
+            trust_level: 対話相手の信頼度レベル（1-4）
             member_profile: 対話相手のプロファイル辞書（get_profileの戻り値）
             channel_overrides: チャンネル別設定辞書
             community_knowledge_text: コミュニティ知識テキスト
@@ -211,15 +211,18 @@ class LLMClient:
             )
 
         # 2. 信頼度レベルによるトーン指示（§12.1 準拠）
+        # v5.3: Level 5除去（v5.3仕様は4段階）
         tone_map = {
             1: "完全な丁寧語で応答してください。初対面の相手です。",
             2: "丁寧語ベースで、やや柔らかい口調で応答してください。",
             3: "丁寧語ベースで、親しみのある表現を混ぜて応答してください。",
             4: "敬語を残しつつ、砕けた表現を使って応答してください。",
-            5: "親しい後輩のような口調で応答してください。",
         }
         tone_instruction = tone_map.get(trust_level, tone_map[1])
-        parts.append(f"\n[信頼度レベル: {trust_level}]\n{tone_instruction}")
+        trust_label = get_trust_label(trust_level)
+        parts.append(
+            f"\n[信頼度レベル: {trust_level}（{trust_label}）]\n{tone_instruction}"
+        )
 
         # 3. 対話相手のプロファイル
         if member_profile:

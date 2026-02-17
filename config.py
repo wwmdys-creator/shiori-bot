@@ -96,6 +96,27 @@ HEART_EMOJIS: dict[int, str] = {
     4: "❤️",  # max    (Lv4: 80-100)
 }
 
+# --- 信頼度レベルラベル（§9 昇格演出 / system_prompt.txt {trust_label} 用） ---
+# ⚠️ v5.3新設: 表示用ラベル。HEART_THRESHOLDS / HEART_EMOJIS と同期すること
+TRUST_LEVEL_LABELS: dict[int, str] = {
+    1: "📎初対面",
+    2: "📓協力者",
+    3: "🔖常連情報源",
+    4: "📖研究協力者",
+}
+
+
+def get_trust_label(level: int) -> str:
+    """信頼度レベルの表示ラベルを返す。
+
+    Args:
+        level: 信頼度レベル（1-4）
+
+    Returns:
+        ラベル文字列（例: "📎初対面"）。範囲外はLv1のラベルを返す。
+    """
+    return TRUST_LEVEL_LABELS.get(level, TRUST_LEVEL_LABELS[1])
+
 # --- リアクション遅延（§10） ---
 REACTION_DELAY_SECONDS: int = 20
 
