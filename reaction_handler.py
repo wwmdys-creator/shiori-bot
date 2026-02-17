@@ -6,6 +6,7 @@ v5.2 → v5.3 更新
   §1:  should_heart_react() 2引数 → 3引数（is_mention_to_shiori 追加）
   §4:  get_heart_emoji() 追加 — 好感度レベル別ハートカラー
   §10: delayed_add_reaction() 追加 — 20秒遅延リアクション
+  §10.10.2: schedule_delayed_reaction() 追加 — 安全ラッパー
 
 依存: config.py (HEART_THRESHOLDS, REACTION_DELAY_SECONDS)
 """
@@ -60,6 +61,7 @@ class ReactionHandler:
       - should_heart_react(): 3引数に拡張（§1）
       - get_heart_emoji(): 好感度スコア別ハートカラー（§4）
       - delayed_add_reaction(): 20秒遅延リアクション（§10）
+      - schedule_delayed_reaction(): 安全ラッパー（§10.10.2）
       - handle_reaction(): 統合フロー更新
     """
 
@@ -129,7 +131,7 @@ class ReactionHandler:
 
         v5.3変更:
           - is_mention_to_shiori 引数追加
-          - 直接 add_reaction() → create_task(delayed_add_reaction()) に変更
+          - schedule_delayed_reaction() 安全ラッパー経由に変更
           - 固定ハート → 好感度レベル別ハートカラー
 
         ⚠️ COMMON_MISTAKES N-01:
@@ -149,10 +151,8 @@ class ReactionHandler:
 
         emoji = self.get_heart_emoji(trust_score)
 
-        # ⚠️ N-01: create_task() 経由（await 直接呼出し禁止）
-        asyncio.create_task(
-            delayed_add_reaction(message, emoji)
-        )
+        # ⚠️ N-01: schedule_delayed_reaction() 安全ラッパー経由（§10.10.2）
+        schedule_delayed_reaction(message, emoji)
         logger.info(
             "リアクション予約: msg=%s, emoji=%s, delay=%ds",
             message.id, emoji, REACTION_DELAY_SECONDS,
@@ -225,3 +225,33 @@ async def delayed_add_reaction(
             message.id, exc,
         )
         return False
+
+
+# =====================================================================
+#  安全ラッパー（§10.10.2）
+# =====================================================================
+
+def schedule_delayed_reaction(
+    message: discord.Message,
+    emoji: str,
+) -> None:
+    """遅延リアクションのスケジュール（Schedule Delayed Reaction）
+
+    create_task() の呼び出しを try/except で囲み、
+    スケジューリング自体の失敗が他の処理に影響しないことを保証する。
+
+    §10.10.2 で規定された安全ラッパー。
+    全リアクション付与箇所はこの関数経由で呼び出すこと。
+
+    Args:
+        message: リアクション対象メッセージ
+        emoji:   リアクション絵文字
+    """
+    try:
+        asyncio.create_task(delayed_add_reaction(message, emoji))
+    except Exception as e:
+        logger.error(
+            "[Reaction] Failed to schedule delayed reaction "
+            "for message %s: %s",
+            message.id, e,
+        )

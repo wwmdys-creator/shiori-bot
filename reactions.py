@@ -5,6 +5,8 @@
 参照: interface_contract.md §2.14
 
 v4.1変更: ✅（CHECKMARK）定数は存在しない。Q27凍結に伴い削除済み。
+v5.3変更: §10.3 — 全リアクション付与に20秒遅延を適用。
+          add_reaction() 内部で schedule_delayed_reaction() を使用する。
 """
 
 import logging
@@ -27,6 +29,11 @@ class ReactionManager:
 
     Note:
         ✅（CHECKMARK）は廃止済み（Q27凍結）。
+
+    v5.3変更:
+        add_reaction() は即座に message.add_reaction() を呼ばず、
+        schedule_delayed_reaction() 経由で20秒遅延付きバックグラウンド
+        タスクとして実行する（§10.3: 全リアクション遅延）。
     """
 
     # 絵文字定数
@@ -50,7 +57,14 @@ class ReactionManager:
         message: "discord.Message",
         reaction_type: str,
     ) -> None:
-        """メッセージに適切な絵文字リアクションを追加する。
+        """メッセージに適切な絵文字リアクションを追加する（20秒遅延）。
+
+        v5.3変更: §10.3 — 全リアクションに20秒遅延を適用。
+        内部で schedule_delayed_reaction() を使用し、
+        バックグラウンドタスクとして遅延付与する。
+
+        ⚠️ 本メソッドは await で呼び出せるが、リアクション付与自体は
+           バックグラウンドで遅延実行される。呼び出し元はブロックされない。
 
         Args:
             message: discord.py の Message オブジェクト
@@ -68,14 +82,14 @@ class ReactionManager:
             logger.warning(f"[add_reaction] Unknown reaction_type: {reaction_type}")
             return
 
-        try:
-            await message.add_reaction(emoji)
-            logger.debug(
-                f"[add_reaction] Added {emoji} to message {message.id} "
-                f"(type={reaction_type})"
-            )
-        except Exception as e:
-            logger.error(f"[add_reaction] Failed to add reaction: {e}")
+        # v5.3 §10.3: 遅延付きリアクション（create_task経由）
+        # ⚠️ COMMON_MISTAKES N-01: await直接呼出し禁止
+        from reaction_handler import schedule_delayed_reaction
+        schedule_delayed_reaction(message, emoji)
+        logger.debug(
+            f"[add_reaction] Scheduled delayed {emoji} for message {message.id} "
+            f"(type={reaction_type})"
+        )
 
     async def add_clip_reaction(self, message: "discord.Message") -> None:
         """予測記録リアクション（📎）を追加する。

@@ -1,9 +1,10 @@
 # 📎 栞（Shiori）モジュール間インターフェース契約書
 
-**Version 4.1 対応** — 全14モジュール＋1テキストファイルの公開API仕様
+**Version 5.3 対応** — 全20モジュール＋1テキストファイルの公開API仕様
 
 作成日: 2026-02-13  
-目的: COMMON_MISTAKES §10（クロスモジュール不整合）、§12（リネーム参照漏れ）、§13（sync/async不整合）、§14（データフォーマット変換層欠如）、§15（未実装メソッド呼び出し）の再発防止
+v5.3更新日: 2026-02-17  
+目的: COMMON_MISTAKES §10（クロスモジュール不整合）、§12（リネーム参照漏れ）、§13（sync/async不整合）、§14（データフォーマット変換層欠如）、§15（未実装メソッド呼び出し）、N-01〜N-04（v5.3固有エラー）の再発防止
 
 ---
 
@@ -41,6 +42,15 @@ shiori_bot/
 ├── member_profile.py   # メンバープロファイル管理
 ├── errors.py           # エラーハンドリング
 ├── reactions.py        # 絵文字リアクション管理
+├── config.py           # 定数・設定値一元管理（★v5.3追加）
+├── reaction_handler.py # ハートリアクション＋遅延リアクション（★v5.3追加）
+├── response_mode.py    # 記録/自由モード判定（★v5.3追加）
+├── trust_level_up.py   # 信頼度レベル昇格検出（★v5.3追加）
+├── daily_maintenance.py     # 日次メンテナンスタスク（★v5.3追加）
+├── weekly_monologue.py      # 週次独り言タスク（★v5.3追加）
+├── prediction_highlighter.py # 予測ハイライト選定（★v5.3追加）
+├── discussion_summary.py    # 議論まとめ機能（★v5.3追加）
+├── response_generator.py    # 応答生成（★v5.3追加）
 ├── system_prompt.txt   # キャラクター定義テキスト
 └── data/               # Markdownデータファイル
 ```
@@ -49,22 +59,30 @@ shiori_bot/
 
 行が「呼び出し元」、列が「呼び出し先」。`✅` = import する。
 
-| 呼び出し元 ＼ 先 → | llm | trust | predictions | categories | timeline | nudge | summarizer | passive_monitor | channel_config | rate_limiter | member_profile | errors | reactions |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **bot.py** | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **llm.py** | — | — | — | — | — | — | — | — | — | — | ✅ | ✅ | — |
-| **trust.py** | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| **predictions.py** | ✅ | — | — | ✅ | ✅ | — | — | — | — | — | — | ✅ | — |
-| **categories.py** | ✅ | — | — | — | — | — | — | — | — | — | — | ✅ | — |
-| **timeline.py** | ✅ | — | — | — | — | — | — | — | — | — | — | ✅ | — |
-| **nudge.py** | ✅ | — | — | — | — | — | — | — | — | — | ✅ | ✅ | — |
-| **summarizer.py** | ✅ | — | — | — | — | — | — | — | — | — | — | ✅ | — |
-| **passive_monitor.py** | ✅ | — | ✅ | ✅ | ✅ | — | — | — | ✅ | — | — | ✅ | — |
-| **channel_config.py** | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| **rate_limiter.py** | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| **member_profile.py** | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| **errors.py** | — | — | — | — | — | — | — | — | — | — | — | — | — |
-| **reactions.py** | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| 呼び出し元 ＼ 先 → | llm | trust | predictions | categories | timeline | nudge | summarizer | passive_monitor | channel_config | rate_limiter | member_profile | errors | reactions | config | reaction_handler | response_mode | trust_level_up | prediction_highlighter | daily_maintenance | weekly_monologue | discussion_summary | response_generator |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **bot.py** | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **llm.py** | — | — | — | — | — | — | — | — | — | — | ✅ | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **trust.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — |
+| **predictions.py** | ✅ | — | — | ✅ | ✅ | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **categories.py** | ✅ | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **timeline.py** | ✅ | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **nudge.py** | ✅ | — | — | — | — | — | — | — | — | — | ✅ | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **summarizer.py** | ✅ | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **passive_monitor.py** | ✅ | — | ✅ | ✅ | ✅ | — | — | — | ✅ | — | — | ✅ | — | — | — | — | — | — | — | — | — | — |
+| **reactions.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — |
+| **reaction_handler.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — |
+| **response_mode.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **trust_level_up.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | ✅ | ✅ | — | — | — | — | — | — | — |
+| **daily_maintenance.py** | — | ✅ | — | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | ✅ | — | — | — | — |
+| **weekly_monologue.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — |
+| **prediction_highlighter.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | ✅ | — | — | — | — | — | — | — | — |
+| **discussion_summary.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **config.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **channel_config.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **rate_limiter.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **member_profile.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
+| **errors.py** | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
 ### 1.3 外部ライブラリ依存
 
@@ -90,7 +108,7 @@ shiori_bot/
 ```python
 class ShioriBot(discord.Client):
     def __init__(self):
-        # 初期化するインスタンス変数
+        # 初期化するインスタンス変数（v4.1既存）
         self.llm: LLMClient                       # llm.py
         self.trust: TrustManager                   # trust.py
         self.predictions: PredictionLedger         # predictions.py
@@ -101,6 +119,15 @@ class ShioriBot(discord.Client):
         self.rate_limiter: RateLimiter             # rate_limiter.py
         self.member_profile: MemberProfileManager  # member_profile.py
         self.reactions: ReactionManager            # reactions.py
+
+        # ★v5.3 追加インスタンス変数
+        self.heart_reactions: ReactionHandler           # reaction_handler.py
+        self.response_gen: ResponseGenerator            # response_generator.py
+        self.level_up_detector: TrustLevelUpDetector    # trust_level_up.py
+        self.prediction_highlighter: PredictionHighlighter  # prediction_highlighter.py
+        self.daily_maintenance_task: DailyMaintenanceTask   # daily_maintenance.py
+        self.weekly_monologue_task: WeeklyMonologueTask     # weekly_monologue.py
+        self.level_up_pending: dict[str, dict] = {}     # 昇格フラグ（§9）
 
     # --- Discordイベントハンドラ ---
 
@@ -666,10 +693,228 @@ class ReactionManager:
         message: 'discord.Message',   # discord.py の Message オブジェクト
         reaction_type: str             # "prediction" | "discussion" | "premortem" | "high_trust"
     ) -> None:
-        """メッセージに適切な絵文字リアクションを追加する"""
+        """メッセージに適切な絵文字リアクションを追加する（20秒遅延）
+        v5.3変更: §10.3 — schedule_delayed_reaction() 経由で遅延付与
+        """
 ```
 
 > **v4.1変更:** ✅（`CHECKMARK`）定数は存在しない。Q27凍結に伴い削除済み。
+> **v5.3変更:** `add_reaction()` 内部で `schedule_delayed_reaction()` を使用。即座の `message.add_reaction()` は行わない。
+
+---
+
+### 2.15 config.py — 定数・設定値一元管理 ★v5.3追加
+
+```python
+# バージョン管理
+BOT_VERSION: str = "5.3"
+
+# 好感度2倍化（§2）
+TRUST_GAIN_MULTIPLIER: int = 2
+
+# ハートカラー閾値（§4, §9 共有）
+HEART_THRESHOLDS: dict[int, tuple[int, int]] = {
+    1: (0, 19),    # newbie → 🧡
+    2: (20, 49),   # low    → 💛
+    3: (50, 79),   # high   → 💗
+    4: (80, 100),  # max    → ❤️
+}
+
+# リアクション遅延（§10）
+REACTION_DELAY_SECONDS: int = 20
+
+# 日次メンテナンス（§5）
+DAILY_MAINTENANCE_HOUR: int = 18   # JST
+
+# 週次独り言（§8）
+MONOLOGUE_DAY: int = 6             # calendar.SUNDAY
+MONOLOGUE_HOUR: int = 21           # JST
+
+# 予測ハイライト（§5.7）
+APPROACHING_MONTHS: int = 6
+MAX_HIGHLIGHTS: int = 2
+
+# 議論まとめ（§7）
+MEMBER_SUMMARY_FETCH_LIMIT: int = 100
+```
+
+> **⚠️ COMMON_MISTAKES N-04:** `HEART_THRESHOLDS` はこの `config.py` が唯一の定義元。`trust.py`, `reaction_handler.py`, `trust_level_up.py` は全て `from config import HEART_THRESHOLDS` で参照すること。
+
+---
+
+### 2.16 reaction_handler.py — ハートリアクション＋遅延リアクション ★v5.3追加
+
+**クラス名:** `ReactionHandler`
+**モジュール関数:** `delayed_add_reaction()`, `schedule_delayed_reaction()`
+
+```python
+class ReactionHandler:
+    def should_heart_react(
+        self,
+        message_content: str,         # [必須] メッセージ内容
+        is_reply_to_shiori: bool,     # [必須] 栞への返信か
+        is_mention_to_shiori: bool,   # [必須] 栞へのメンションか（★v5.3追加）
+    ) -> bool:
+        """ハートリアクション付与判定（§1, §12.6.1）"""
+
+    def get_heart_emoji(self, trust_score: int) -> str:
+        """好感度スコア別ハートカラー（§4）
+        Returns: "🧡" | "💛" | "💗" | "❤️"
+        """
+
+    async def handle_reaction(
+        self,
+        message: discord.Message,     # [必須]
+        trust_score: int,             # [必須]
+        is_reply_to_shiori: bool,     # [必須]
+        is_mention_to_shiori: bool,   # [必須]（★v5.3追加）
+    ) -> None:
+        """リアクション統合フロー（§4.5, §12.6.2）"""
+
+
+async def delayed_add_reaction(
+    message: discord.Message,         # [必須]
+    emoji: str,                       # [必須]
+    delay: int = REACTION_DELAY_SECONDS,  # [任意]
+) -> bool:
+    """遅延付きリアクション付与（§10, §12.5.2）
+    ⚠️ asyncio.create_task() で呼び出すこと（await直接禁止 — N-01）
+    """
+
+def schedule_delayed_reaction(
+    message: discord.Message,         # [必須]
+    emoji: str,                       # [必須]
+) -> None:
+    """遅延リアクションの安全ラッパー（§10.10.2）
+    create_task() 呼び出しを try/except で囲む。
+    全リアクション付与箇所はこの関数経由で呼び出すこと。
+    """
+```
+
+> **⚠️ COMMON_MISTAKES N-01:** `await delayed_add_reaction(...)` は禁止。必ず `schedule_delayed_reaction()` または `asyncio.create_task()` 経由。
+
+---
+
+### 2.17 response_mode.py — 記録/自由モード判定 ★v5.3追加
+
+```python
+def determine_response_mode(message_content: str) -> str:
+    """メッセージから応答モードを判定（§3）
+    Returns: "record" | "free"
+    """
+```
+
+---
+
+### 2.18 trust_level_up.py — 信頼度レベル昇格検出 ★v5.3追加
+
+**クラス名:** `TrustLevelUpDetector`
+
+```python
+class TrustLevelUpDetector:
+    def check_level_up(
+        self,
+        user_id: str,       # [必須]
+        old_score: int,     # [必須]
+        new_score: int,     # [必須]
+    ) -> dict | None:
+        """昇格を検出（§9, sync）
+        Returns:
+            {"old_level": int, "new_level": int, "new_heart": str} | None
+        """
+```
+
+> **⚠️ COMMON_MISTAKES N-03:** 昇格フラグの消費は `level_up_pending.pop()` で行うこと。`.get()` は禁止。
+
+---
+
+### 2.19 daily_maintenance.py — 日次メンテナンス ★v5.3追加
+
+**クラス名:** `DailyMaintenanceTask`
+**コンストラクタ:** `DailyMaintenanceTask(bot)`（コンストラクタ注入, §12.9）
+
+```python
+class DailyMaintenanceTask:
+    def __init__(self, bot: ShioriBot): ...
+
+    async def run_daily_maintenance(self) -> dict:
+        """日次メンテナンス実行（§5, async）
+        Returns: {"total_messages": int, "new_predictions": int, ...}
+        """
+```
+
+---
+
+### 2.20 weekly_monologue.py — 週次独り言 ★v5.3追加
+
+**クラス名:** `WeeklyMonologueTask`
+**コンストラクタ:** `WeeklyMonologueTask(bot)`（コンストラクタ注入, §12.9）
+
+```python
+class WeeklyMonologueTask:
+    def __init__(self, bot: ShioriBot): ...
+
+    async def weekly_monologue_loop(self) -> None:
+        """週次独り言ループ（§8, async）"""
+```
+
+---
+
+### 2.21 prediction_highlighter.py — 予測ハイライト選定 ★v5.3追加
+
+**クラス名:** `PredictionHighlighter`
+
+```python
+class PredictionHighlighter:
+    def select_highlights(
+        self,
+        predictions: list[dict],   # [必須]
+        current_date: str,         # [必須]
+    ) -> list[dict]:
+        """予測ハイライト選定（§5.7, sync, LLM呼び出しなし）
+        Returns: 最大 MAX_HIGHLIGHTS 件のリスト
+        """
+```
+
+---
+
+### 2.22 discussion_summary.py — 議論まとめ ★v5.3追加
+
+```python
+def detect_summary_request(message_content: str) -> dict | None:
+    """要約依頼検出（§7, sync）
+    Returns: {"type": "general"} | {"type": "member", "members": [...]} | None
+    """
+
+async def handle_member_summary(
+    channel: discord.TextChannel,
+    members: list[str],
+    fetch_limit: int = MEMBER_SUMMARY_FETCH_LIMIT,
+) -> str:
+    """メンバー指定要約（§7, async — Sonnet API呼び出し）"""
+```
+
+---
+
+### 2.23 response_generator.py — 応答生成 ★v5.3追加
+
+**クラス名:** `ResponseGenerator`
+
+```python
+class ResponseGenerator:
+    async def generate(
+        self,
+        message: discord.Message,         # [必須]
+        config: dict,                     # [必須]
+        context: str | None = None,       # [任意]
+        level_up_hint: str | None = None, # [任意] ★v5.3追加
+        response_mode: str = "free",      # [任意] ★v5.3追加
+        *,
+        system_prompt: str | None = None, # [任意]
+        api_messages: list | None = None, # [任意]
+    ) -> str:
+        """応答生成（§12.6.3, async）"""
+```
 
 ---
 
@@ -766,7 +1011,21 @@ bot.py: on_message()
 | **member_profile.py** | `load()` | **async** | ファイル読み込み |
 | | その他全メソッド | sync | メモリ参照のみ |
 | **errors.py** | `format_error_message()` | sync | テキスト生成のみ |
-| **reactions.py** | `add_reaction()` | **async** | Discord API呼び出し |
+| **reactions.py** | `add_reaction()` | **async** | Discord API呼び出し（内部でschedule_delayed_reaction経由） |
+| **config.py** | 全定数 | — | 定数定義のみ |
+| **reaction_handler.py** | `should_heart_react()` | sync | 正規表現マッチのみ |
+| | `get_heart_emoji()` | sync | 条件分岐のみ |
+| | `handle_reaction()` | **async** | リアクション統合フロー |
+| | `delayed_add_reaction()` | **async** | asyncio.sleep + Discord API |
+| | `schedule_delayed_reaction()` | sync | create_task呼び出し（安全ラッパー） |
+| **response_mode.py** | `determine_response_mode()` | sync | 正規表現マッチのみ |
+| **trust_level_up.py** | `check_level_up()` | sync | 条件分岐のみ |
+| **daily_maintenance.py** | `run_daily_maintenance()` | **async** | LLM + ファイル書き込み |
+| **weekly_monologue.py** | `weekly_monologue_loop()` | **async** | LLM + Discord送信 |
+| **prediction_highlighter.py** | `select_highlights()` | sync | 計算のみ（LLM不使用） |
+| **discussion_summary.py** | `detect_summary_request()` | sync | 正規表現マッチのみ |
+| | `handle_member_summary()` | **async** | LLM呼び出し |
+| **response_generator.py** | `generate()` | **async** | Anthropic API呼び出し |
 
 ---
 
@@ -794,8 +1053,9 @@ bot.py: on_message()
 |------|----------|
 | 2026-02-13 | 初版作成。v4.1仕様書に基づき全14モジュールのインターフェースを定義 |
 | 2026-02-14 | `llm.py` の `build_system_prompt()` に `community_knowledge: str | None` パラメータを追加 |
+| 2026-02-17 | **v5.3対応:** §2.15〜§2.23 追加（config, reaction_handler, response_mode, trust_level_up, daily_maintenance, weekly_monologue, prediction_highlighter, discussion_summary, response_generator）。依存マトリクス更新。async/sync表にv5.3メソッド追加。reactions.py遅延化（§10.3）反映。bot.py インスタンス変数にv5.3モジュール追加 |
 
 ---
 
-*本文書は COMMON_MISTAKES.md §10, §12, §13, §14, §15 の再発防止を目的として作成されました。*  
-*Source: Shiori_Requirements_v4_1.md §10.2, data_schema.md, prompt_templates.md, channel_behavior.md §6*
+*本文書は COMMON_MISTAKES.md §10, §12, §13, §14, §15, N-01〜N-04 の再発防止を目的として作成されました。*  
+*Source: Shiori_Requirements_v4_1.md, Shiori_v5_3_Detailed_Spec §1〜§13, data_schema.md, prompt_templates.md, channel_behavior.md §6*
