@@ -572,15 +572,15 @@ class ShioriBot(discord.Client):
             )
 
         # Phase 4/6: 昇格フラグ消費（§9.4, N-03/N-04）
+        # C-01修正: ResponseGeneratorに渡して応答モードに応じた処理を委譲
+        level_up_hint_text = None
         level_up_info = self.level_up_pending.pop(str(user_id), None)
         if level_up_info:
             new_level = level_up_info["new_level"]
-            # P0-A2 hotfix: check_level_up() は {"old_level","new_level","new_heart"} を返す
-            # "new_score" は存在しない → "new_heart"（既に絵文字文字列）を直接使用
             heart = level_up_info["new_heart"]
             hint_prompts = LEVEL_UP_HINT_PROMPTS.get(new_level, "")
-            system_prompt += (
-                f"\n\n[昇格通知ヒント]\n"
+            level_up_hint_text = (
+                f"[昇格通知ヒント]\n"
                 f"このメンバーがLv{level_up_info['old_level']}→Lv{new_level}に昇格しました。\n"
                 f"ハート色: {heart}\n"
                 f"ヒント: {hint_prompts}\n"
@@ -597,12 +597,21 @@ class ShioriBot(discord.Client):
             bot_user_id=self.user.id,
         )
 
-        # STEP 11: メイン応答生成
-        response_text = await self.llm.generate_response(
+        # STEP 11: メイン応答生成 — ResponseGenerator経由（C-01修正）
+        # ResponseGeneratorが応答モード指示(§3.3)、昇格モード保護(§9.5.2)、
+        # 後処理(F-07文字数/F-10箇条書き除去)を適用する。
+        response_config = ResponseConfig(
+            response_type="prediction" if response_mode == "record" else "casual",
+            use_sonnet=True,
+            trust_level=trust_level,
+        )
+        response_text = await self.response_generator.generate(
+            message=message,
+            config=response_config,
+            level_up_hint=level_up_hint_text,
+            response_mode=response_mode,
             system_prompt=system_prompt,
-            messages=api_messages,
-            max_tokens=500,
-            temperature=0.7,
+            api_messages=api_messages,
         )
 
         # STEP 11.5: 名前プレフィックスの除去

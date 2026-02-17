@@ -119,6 +119,9 @@ class ResponseGenerator:
         context: str | None = None,
         level_up_hint: str | None = None,
         response_mode: str = "free",
+        *,
+        system_prompt: str | None = None,
+        api_messages: list[dict] | None = None,
     ) -> str:
         """応答を生成する
 
@@ -127,6 +130,10 @@ class ResponseGenerator:
                 Noneでなければシステムプロンプト末尾に追加する
             response_mode: "record"ならフォーマット型応答、"free"なら自由会話（§3.3参照）
                 デフォルトは"free"
+            system_prompt: 呼び出し元で構築済みのシステムプロンプト（省略時は内部で構築）
+                bot.pyメインパスではbuild_system_prompt()で構築した完全なプロンプトを渡す
+            api_messages: 呼び出し元で構築済みのAPIメッセージリスト（省略時はmessage.contentから生成）
+                bot.pyメインパスではconvert_context_to_api_format()の戻り値を渡す
 
         ⚠️ level_up_hint は level_up_pending から pop() で取得した値（§9.4参照）
            get() で取得するとフラグが消費されず無限演出になる（COMMON_MISTAKES N-03）
@@ -138,34 +145,45 @@ class ResponseGenerator:
             context: 追加コンテキスト文字列
             level_up_hint: 昇格演出プロンプト（自由モード時のみ有効）
             response_mode: "record" | "free"
+            system_prompt: 構築済みシステムプロンプト（keyword-only）
+            api_messages: 構築済みAPIメッセージリスト（keyword-only）
 
         Returns:
             str: 生成された応答テキスト
         """
         try:
             # ----- システムプロンプト構築 -----
-            system_prompt = self.llm.build_system_prompt(
-                trust_level=config.trust_level,
-                member_profile=None,
-                channel_overrides=None,
-                community_knowledge_text=None,
-            )
+            if system_prompt is not None:
+                # C-01修正: bot.pyメインパスから構築済みプロンプトが渡された場合はそのまま使用
+                final_prompt = system_prompt
+                logger.debug(
+                    "[ResponseGenerator] Using pre-built system_prompt (%d chars)",
+                    len(final_prompt),
+                )
+            else:
+                # CFR等の軽量パスではResponseGenerator内部で構築
+                final_prompt = self.llm.build_system_prompt(
+                    trust_level=config.trust_level,
+                    member_profile=None,
+                    channel_overrides=None,
+                    community_knowledge_text=None,
+                )
 
             # モード別指示の追加（§3.3）
             if response_mode == "record":
-                system_prompt += RECORD_MODE_INSTRUCTION
+                final_prompt += RECORD_MODE_INSTRUCTION
                 logger.debug("[ResponseGenerator] Response mode: RECORD")
             else:
-                system_prompt += FREE_MODE_INSTRUCTION
+                final_prompt += FREE_MODE_INSTRUCTION
                 logger.debug("[ResponseGenerator] Response mode: FREE")
 
-            # 追加コンテキスト（v5.2 既存）
+            # 追加コンテキスト（v5.2 既存 — CFRパス等で使用）
             if context:
-                system_prompt += f"\n\n{context}"
+                final_prompt += f"\n\n{context}"
 
             # 昇格演出プロンプト挿入（§9.5 — 自由モード時のみ）
             if level_up_hint and response_mode == "free":
-                system_prompt += f"\n\n{level_up_hint}"
+                final_prompt += f"\n\n{level_up_hint}"
                 logger.info(
                     "[ResponseGenerator] Level-up hint inserted into system prompt"
                 )
@@ -176,22 +194,27 @@ class ResponseGenerator:
 
             # ハートカラー指示（§4 — ハートを含める場合のカラー指定）
             heart_emoji = self._get_heart_emoji(config.trust_level)
-            system_prompt += (
+            final_prompt += (
                 f"\n\nこのメンバーへのハート絵文字は{heart_emoji}を使用してください。"
             )
 
             # ----- メッセージ構築 -----
-            user_content = message.content if hasattr(message, "content") else str(message)
+            if api_messages is not None:
+                # C-01修正: bot.pyメインパスから構築済みメッセージが渡された場合
+                messages_for_api = api_messages
+            else:
+                user_content = message.content if hasattr(message, "content") else str(message)
+                messages_for_api = [{"role": "user", "content": user_content}]
 
             # ----- API呼び出し -----
-            max_tokens = 1000
+            max_tokens = 500
             if config.max_chars:
                 # 概算: 日本語1文字≒2トークン、余裕を持たせる
                 max_tokens = min(max_tokens, config.max_chars * 2)
 
             response_text = await self.llm.generate_response(
-                system_prompt=system_prompt,
-                messages=[{"role": "user", "content": user_content}],
+                system_prompt=final_prompt,
+                messages=messages_for_api,
                 max_tokens=max_tokens,
                 temperature=0.7,
             )

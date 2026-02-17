@@ -66,15 +66,52 @@ def safe_parse_json(text: str) -> dict | None:
 
 
 def _load_system_prompt_file() -> str:
-    """system_prompt.txt をロードする。見つからなければ空文字列。"""
+    """system_prompt.txt の BASE_SYSTEM_PROMPT セクションのみをロードする。
+
+    C-02修正: 以前はファイル全体（RECORD_MODE / FREE_MODE / DAILY_REPORT /
+    WEEKLY_MONOLOGUE 等の全セクション）をそのままLLMに送信していた。
+    修正後は ``## ===== BASE_SYSTEM_PROMPT =====`` セクションのみを抽出し、
+    動的プレースホルダー行（{mode_instruction} 等）を除去する。
+
+    モード別指示は response_generator.py が動的に追加する。
+    """
+    raw = ""
     for path in _SYSTEM_PROMPT_PATHS:
         if path.exists():
-            content = path.read_text(encoding="utf-8").strip()
-            if content:
-                logger.debug("Loaded system_prompt.txt from %s (%d chars)", path, len(content))
-                return content
-    logger.warning("system_prompt.txt not found in any expected path")
-    return ""
+            raw = path.read_text(encoding="utf-8").strip()
+            if raw:
+                logger.debug("Loaded system_prompt.txt from %s (%d chars)", path, len(raw))
+                break
+    if not raw:
+        logger.warning("system_prompt.txt not found in any expected path")
+        return ""
+
+    # BASEセクションのみ抽出: 2番目の ``## =====`` 行の直前までを取得
+    lines = raw.split("\n")
+    base_lines: list[str] = []
+    found_first_section = False
+    for line in lines:
+        if line.startswith("## ====="):
+            if found_first_section:
+                # 2番目のセクション区切り → ここで打ち切り
+                break
+            found_first_section = True
+            continue  # ``## ===== BASE_SYSTEM_PROMPT =====`` 行自体はスキップ
+        base_lines.append(line)
+
+    # 動的プレースホルダー行を除去（response_generator / bot.py が動的に注入する）
+    placeholder_tokens = {"{mode_instruction}", "{member_context}", "{extra_context}"}
+    cleaned = [
+        ln for ln in base_lines
+        if ln.strip() not in placeholder_tokens
+    ]
+
+    result = "\n".join(cleaned).strip()
+    logger.info(
+        "system_prompt BASE section extracted: %d chars (original %d chars)",
+        len(result), len(raw),
+    )
+    return result
 
 
 class LLMClient:
