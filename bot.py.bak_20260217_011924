@@ -56,11 +56,6 @@ from member_query import MemberQueryDetector
 from reaction_handler import ReactionHandler
 from response_generator import ResponseConfig, ResponseGenerator
 
-# Phase 4/6: 昇格検出・予測ハイライト
-from trust_level_up import TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS, get_heart_emoji
-from prediction_highlighter import PredictionHighlighter
-
-
 logger = logging.getLogger("shiori.bot")
 
 JST = timezone(timedelta(hours=9))
@@ -208,25 +203,6 @@ class ShioriBot(discord.Client):
             f"Loaded {member_count} members, {prediction_count} predictions. "
             f"CFR={'ON' if shiori_config.CFR_ENABLED else 'OFF'}"
         )
-
-    def on_trust_score_change(
-        self, user_id: str, old_score: int, new_score: int
-    ) -> None:
-        """好感度スコア変更時の昇格チェック（§9.4, §12.11 [5]）
-
-        ⚠️ N-05: 呼び出し側で try/except で囲むこと。
-        ⚠️ §13: sync メソッド。
-        """
-        level_up_info = self.level_up_detector.check_level_up(
-            user_id, old_score, new_score
-        )
-        if level_up_info is not None:
-            self.level_up_pending[user_id] = level_up_info
-            logger.info(
-                f"[LevelUp] Flag set for {user_id}: "
-                f"Lv{level_up_info['old_level']} -> Lv{level_up_info['new_level']}"
-            )
-
 
     async def on_message(self, message: discord.Message) -> None:
         """メッセージ受信時の統合ハンドラ。"""

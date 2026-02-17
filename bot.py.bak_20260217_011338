@@ -1,0 +1,256 @@
+"""
+bot_phase4_integration.py - Phase 4 bot.py 統合パッチ
+
+Shiori v5.3 Phase 4: trust_level_up.py + prediction_highlighter.py の bot.py 統合
+
+本ファイルは bot.py に適用すべき変更箇所を str_replace 形式で記述する。
+実際の bot.py ソースに対して順番に適用すること。
+
+適用対象: bot.py (v4.1+v5.2+v5.3-Phase3 ベース)
+適用後バージョン: v4.1+v5.2+v5.3-Phase4
+
+COMMON_MISTAKES 適用パターン:
+  N-03: level_up_pending は必ず pop() で取得（get() 禁止）
+  N-04: 記録モードでは昇格フラグを消費せず再登録
+  N-05: on_trust_score_change() のエラーが応答をブロックしない
+  §10: クラス名・メソッド名を §12.7.5 に厳密一致
+  §13: check_level_up() は sync、on_trust_score_change() は普通のメソッド
+  §15: 全公開メソッドが実装済み（スタブ不可）
+"""
+
+
+# =============================================================================
+# 変更点 1: import 文の追加
+# =============================================================================
+# 適用箇所: bot.py の import ブロック末尾
+# 既存の import（response_mode, daily_maintenance 等）の後に追加
+#
+# --- 追加する import ---
+IMPORT_ADDITIONS = """
+from trust_level_up import TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS, get_heart_emoji
+from prediction_highlighter import PredictionHighlighter
+"""
+
+
+# =============================================================================
+# 変更点 2: コンストラクタ / setup_hook への注入（§12.9）
+# =============================================================================
+# 適用箇所: ShioriBot.__init__() または setup_hook() 内
+# Phase 3 で追加された daily_maintenance, weekly_monologue の初期化の後に追加
+#
+# --- 追加するコード ---
+CONSTRUCTOR_ADDITIONS = """
+        # ===== Phase 4: 昇格検出・予測ハイライト =====
+        # 昇格検出器（ステートレス — §12.9）
+        self.level_up_detector = TrustLevelUpDetector()
+
+        # 予測ハイライト選定器（ステートレス — §12.9）
+        self.prediction_highlighter = PredictionHighlighter()
+
+        # 昇格保留フラグ辞書（メモリ上のみ、永続化なし — §9.5）
+        # キー: user_id (str), 値: {"old_level": int, "new_level": int, "new_heart": str}
+        # ⚠️ 取得時は必ず pop() を使用すること（N-03）
+        self.level_up_pending: dict[str, dict] = {}
+"""
+
+
+# =============================================================================
+# 変更点 3: on_trust_score_change() メソッドの追加
+# =============================================================================
+# 適用箇所: ShioriBot クラス内（on_message の前か後）
+# スコア変更時に呼ばれ、昇格検出＋フラグ設定を行う
+#
+# --- 追加するメソッド ---
+ON_TRUST_SCORE_CHANGE_METHOD = """
+    def on_trust_score_change(
+        self, user_id: str, old_score: int, new_score: int
+    ) -> None:
+        \"\"\"好感度スコア変更時の昇格チェック（§9.4, §12.11 [5]）
+
+        TrustLevelUpDetector.check_level_up() を呼び、昇格が検出された場合は
+        level_up_pending にフラグを設定する。
+
+        Args:
+            user_id: メンバーID
+            old_score: 変更前スコア (0-100)
+            new_score: 変更後スコア (0-100)
+
+        ⚠️ N-05: 本メソッドのエラーが応答生成をブロックしてはならない。
+             呼び出し側で try/except で囲むこと。
+        ⚠️ §13: sync メソッド。check_level_up() も sync。
+        \"\"\"
+        level_up_info = self.level_up_detector.check_level_up(
+            user_id, old_score, new_score
+        )
+        if level_up_info is not None:
+            self.level_up_pending[user_id] = level_up_info
+            logger.info(
+                f"[LevelUp] Flag set for {user_id}: "
+                f"Lv{level_up_info['old_level']} → Lv{level_up_info['new_level']}"
+            )
+"""
+
+
+# =============================================================================
+# 変更点 4: スコア変更箇所からの on_trust_score_change() 呼び出し
+# =============================================================================
+# 適用箇所: 好感度スコアが変更される全箇所（record_interaction の戻り値取得後）
+# 既存の trust_manager.record_interaction() 呼び出しの直後に追加
+#
+# 【パターン】既存コードが以下のような形:
+#   result = await self.trust_manager.record_interaction(user_id, action)
+            # Phase 4/6: 昇格チェック（N-05: エラー隔離必須）
+            try:
+                self.on_trust_score_change(
+                    str(user_id),
+                    result["old_score"],
+                    result["new_score"],
+                )
+            except Exception as e:
+                logger.error(f"[LevelUp] on_trust_score_change failed: {e}")
+
+#
+# これを以下のように拡張:
+SCORE_CHANGE_HOOK = """
+        # --- 既存コード（例）---
+        result = await self.trust_manager.record_interaction(user_id, action)
+
+        # --- Phase 4 追加: 昇格チェック ---
+        # ⚠️ N-05: エラー隔離必須。昇格チェック失敗で応答が止まらないこと。
+        try:
+            self.on_trust_score_change(
+                str(user_id),
+                result["old_score"],
+                result["new_score"],
+            )
+        except Exception as e:
+            logger.error(f"[LevelUp] on_trust_score_change failed: {e}")
+"""
+
+
+# =============================================================================
+# 変更点 5: _handle_mention() 内での昇格フラグ消費
+# =============================================================================
+# 適用箇所: メンション応答生成の直前（ResponseGenerator.generate() 呼び出し前）
+# response_mode 判定の後、プロンプト構築の前に挿入
+#
+# ⚠️ N-03 最重要: pop() で取得。get() は絶対禁止。
+# ⚠️ N-04 必須: 記録モードでは再登録。
+LEVEL_UP_FLAG_CONSUMPTION = """
+        # ===== Phase 4: 昇格フラグ消費（§9.5, N-03, N-04） =====
+        # ⚠️ CRITICAL: pop() 必須。get() を使うと昇格演出が無限ループする。
+        level_up_info = self.level_up_pending.pop(user_id, None)
+
+        level_up_hint = ""
+        if level_up_info is not None:
+            if response_mode == "free":
+                # 自由モード: 昇格演出をプロンプトに追加
+                level_up_hint = LEVEL_UP_HINT_PROMPTS.get(
+                    level_up_info["new_level"], ""
+                )
+                logger.info(
+                    f"[LevelUp] Consuming flag for {user_id}: "
+                    f"Lv{level_up_info['new_level']} hint applied"
+                )
+            elif response_mode == "record":
+                # ⚠️ N-04: 記録モードでは演出しない。フラグを再登録。
+                self.level_up_pending[user_id] = level_up_info
+                logger.info(
+                    f"[LevelUp] Re-registered flag for {user_id}: "
+                    f"record mode, deferring to next free response"
+                )
+"""
+
+
+# =============================================================================
+# 変更点 6: ResponseGenerator.generate() への level_up_hint 渡し
+# =============================================================================
+# 適用箇所: generate() 呼び出し時の extra_context / system_prompt_addition に
+#           level_up_hint を結合する
+#
+# 【パターン】既存コードが以下のような形:
+#   response = await self.response_generator.generate(
+#       message=message,
+#       config=config,
+#       context=context,
+#   )
+#
+# これを以下のように拡張:
+GENERATE_WITH_LEVEL_UP = """
+        # --- Phase 4: 昇格ヒントをコンテキストに追加 ---
+        if level_up_hint:
+            extra_context = (extra_context or "") + "\\n" + level_up_hint
+"""
+
+
+# =============================================================================
+# 変更点 7: バージョン文字列の更新
+# =============================================================================
+VERSION_UPDATE = """
+BOT_VERSION = "v4.1+v5.2+v5.3-Phase6"
+"""
+
+
+# =============================================================================
+# 変更点 8: prediction_highlighter の daily_maintenance 連携
+# =============================================================================
+# ⚠️ prediction_highlighter は daily_maintenance.py から呼ばれる。
+#    bot.py では self.prediction_highlighter を daily_maintenance に渡す。
+#
+# 適用箇所: DailyMaintenanceTask の初期化時
+DAILY_MAINTENANCE_HIGHLIGHTER = """
+        # daily_maintenance に prediction_highlighter を渡す
+        # daily_maintenance.py 側で self.highlighter.select_highlights() を呼ぶ
+        self.daily_maintenance = DailyMaintenanceTask(
+            bot=self,
+            prediction_highlighter=self.prediction_highlighter,
+        )
+"""
+
+
+# =============================================================================
+# 統合フロー全体（§12.11 準拠）
+# =============================================================================
+# on_message(message) 内の処理順序:
+#
+# [1] 基本フィルタ（Bot、非MAINカテゴリ等を除外）
+# [2] 受動監視: 活動記録、予測候補の内部記録
+# [3] リアクション判定（§1, §4, §10 統合）
+#     - should_react_heart(content, is_reply, is_mention)
+#     - get_heart_emoji(trust_score)  ← trust_level_up.py から import
+#     - asyncio.create_task(delayed_add_reaction(msg, heart))
+# [4] CFR判定（v5.2 既存処理、変更なし）
+# [5] メンション応答
+#     - determine_response_mode(content)
+#     - detect_summary_request(content) → 要約処理
+#     - 好感度更新 → on_trust_score_change()  ← Phase 4 追加
+#     - 昇格フラグ消費（pop, N-03/N-04）     ← Phase 4 追加
+#     - ResponseGenerator.generate(... level_up_hint=hint ...)
+# [6] 動的学習（v5.2 既存処理、変更なし）
+
+
+# =============================================================================
+# 検証コマンド（§12.14 準拠）
+# =============================================================================
+VERIFICATION_COMMANDS = """
+# [G12-4] level_up_pending の取得方法確認
+grep -n "level_up_pending" *.py
+# → 取得（値の参照）箇所が .pop( であること
+# → .get( が 0件であること（N-03 違反防止）
+
+# [G12-5] sync Anthropic クライアント不使用
+grep -rn "from anthropic import Anthropic$" *.py
+# → 0件
+
+# Phase 4 固有: trust_level_up.py の import 確認
+grep -n "from trust_level_up import" *.py
+# → bot.py に TrustLevelUpDetector, LEVEL_UP_HINT_PROMPTS, get_heart_emoji
+
+# Phase 4 固有: prediction_highlighter.py の import 確認
+grep -n "from prediction_highlighter import" *.py
+# → bot.py (or daily_maintenance.py) に PredictionHighlighter
+
+# AST 構文検証
+python3 -c "import ast; ast.parse(open('trust_level_up.py').read()); print('OK: trust_level_up.py')"
+python3 -c "import ast; ast.parse(open('prediction_highlighter.py').read()); print('OK: prediction_highlighter.py')"
+"""
