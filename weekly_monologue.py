@@ -5,18 +5,22 @@
 Sonnetモデルで生成し、サーバーの実際の議論を反映した内容にする。
 
 インターフェース契約: §12.7.4
-依存: bot, config.py, Sonnet API
+依存: bot, config.py, shiori_posting.py, Sonnet API
 呼び出し元: bot.py (discord.ext.tasks.loop)
 
 COMMON_MISTAKES対応:
   N-05: チャンネルNoneチェック必須 (§18 Railway Volume)
   §15: 全メソッドにエラー隔離 — コンテキスト収集失敗でも生成は続行
+  §38: Forum Thread と TextChannel を混同しない
+       → 投稿は shiori_posting.post_to_shiori_thread() に委譲
 """
 
 import calendar
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+
+from shiori_posting import post_to_shiori_thread
 
 logger = logging.getLogger("shiori.weekly_monologue")
 
@@ -108,7 +112,8 @@ class WeeklyMonologueTask:
                    - bot.config: 設定オブジェクト
         """
         self.bot = bot
-        self.shiori_channel_id: int | None = None
+        # ⚠️ §38: shiori_channel_id は不要。
+        #    投稿は shiori_posting.post_to_shiori_thread() に委譲。
 
     # ========== 公開メソッド ==========
 
@@ -213,44 +218,16 @@ class WeeklyMonologueTask:
         Args:
             content: [必須] 投稿テキスト
 
-        ⚠️ N-05: bot.get_channel() の戻り値がNoneになりうる
-        ⚠️ Forbidden例外のハンドリング必須
+        ⚠️ §38: Forum Thread への投稿は shiori_posting に委譲
+        ⚠️ _find_shiori_channel() は廃止 — SHIORI_THREAD_ID を使用
         """
-        if self.shiori_channel_id is None:
-            self.shiori_channel_id = await self._find_shiori_channel()
-
-        if self.shiori_channel_id is None:
+        success = await post_to_shiori_thread(
+            self.bot, content, caller="WeeklyMonologue"
+        )
+        if not success:
             logger.error(
-                "[WeeklyMonologue] Shiori channel not found, "
-                "skipping monologue"
+                "[WeeklyMonologue] Failed to post monologue to Shiori_ch"
             )
-            return
-
-        channel = self.bot.get_channel(self.shiori_channel_id)
-        if channel is None:
-            logger.error(
-                f"[WeeklyMonologue] Channel {self.shiori_channel_id} "
-                f"not found in cache"
-            )
-            return
-
-        try:
-            await channel.send(content)
-        except Exception as e:
-            logger.error(f"[WeeklyMonologue] Post failed: {e}")
-
-    async def _find_shiori_channel(self) -> int | None:
-        """Shiori_chのチャンネルIDを検索する
-
-        Returns:
-            チャンネルID。見つからない場合はNone。
-        """
-        for guild in self.bot.guilds:
-            for channel in guild.text_channels:
-                name_lower = channel.name.lower()
-                if "shiori" in name_lower or "\u681e" in channel.name:
-                    return channel.id
-        return None
 
     async def _gather_weekly_context(self) -> dict:
         """直近1週間のサーバー活動サマリーを収集する（§8.4.3）
@@ -367,7 +344,7 @@ class WeeklyMonologueTask:
                 }],
             )
             raw = response.content[0].text.strip()
-            topics = [t.strip() for t in raw.split("\u3001") if t.strip()]
+            topics = [t.strip() for t in raw.split("、") if t.strip()]
             if not topics:
                 topics = [t.strip() for t in raw.split(",") if t.strip()]
             return topics[:5] if topics else ["（抽出失敗）"]

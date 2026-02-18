@@ -11,6 +11,8 @@ v5.2 既存定数 + v5.3 追加定数
            （N-04: 三重重複の解消 — Single Source of Truth）
   v5.3-P0P1-v3: SHIORI_KEYWORD_PATTERNS, contains_shiori_keyword() 追加
                  （cfr.py DIRECT_MENTION_PATTERNS の SSoT化）
+  v5.3-P2: SHIORI_THREAD_ID 追加
+           （§38: Forum Thread と TextChannel を混同しない）
 """
 
 import os
@@ -61,6 +63,13 @@ ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 MAIN_CHANNEL_CATEGORY_ID: int = int(
     os.getenv("MAIN_CHANNEL_CATEGORY_ID", "0")
 )
+
+# --- Shiori_ch (Forum Thread) ---
+# ⚠️ v5.3-P2追加: Shiori_ch は singularity_forum (ForumChannel) 内の Thread。
+#    TextChannel ではないため guild.text_channels には現れない。
+#    daily_maintenance.py と weekly_monologue.py の投稿先として使用。
+#    Railway環境変数で設定: SHIORI_THREAD_ID=1473643298701971578
+SHIORI_THREAD_ID: int = int(os.getenv("SHIORI_THREAD_ID", "0"))
 
 # --- Bot ユーザーID（on_ready で設定） ---
 BOT_USER_ID: int | None = None

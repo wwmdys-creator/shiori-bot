@@ -4,19 +4,22 @@
 チャンネル走査、予測検出、プロファイル更新、好感度減衰、報告投稿を行う。
 
 インターフェース契約: §12.7.2
-依存: prediction_highlighter.py, config.py
+依存: prediction_highlighter.py, config.py, shiori_posting.py
 呼び出し元: bot.py (discord.ext.tasks.loop)
 
 COMMON_MISTAKES対応:
   N-05: チャンネルNoneチェック必須 (§18 Railway Volume)
   §15: 全メソッドにエラー隔離 — 1ステップ失敗で全体を止めない
   §12.4.4: 戻り値フォーマット厳守
+  §38: Forum Thread と TextChannel を混同しない
+       → 投稿は shiori_posting.post_to_shiori_thread() に委譲
 """
 
 import logging
 from datetime import datetime, timedelta, timezone
 
 import config as shiori_config
+from shiori_posting import post_to_shiori_thread
 
 logger = logging.getLogger("shiori.daily_maintenance")
 
@@ -42,7 +45,7 @@ class DailyMaintenanceTask:
                    - bot.config: 設定オブジェクト（BOT_VERSION, DEPLOY_DATE等）
         """
         self.bot = bot
-        self.shiori_channel_id: int | None = None
+        # Shiori_ch への投稿は shiori_posting.post_to_shiori_thread() に委譲
         self._highlighter = None  # 遅延初期化
 
     @property
@@ -54,23 +57,6 @@ class DailyMaintenanceTask:
         return self._highlighter
 
     # ========== 公開メソッド ==========
-
-    async def find_shiori_channel(self) -> int | None:
-        """Shiori_chのチャンネルIDを検索する
-
-        Returns:
-            チャンネルID。見つからない場合はNone。
-
-        検索基準:
-            チャンネル名に "shiori"（大文字小文字不問）
-            または "栞" を含むテキストチャンネル
-        """
-        for guild in self.bot.guilds:
-            for channel in guild.text_channels:
-                name_lower = channel.name.lower()
-                if "shiori" in name_lower or "栞" in channel.name:
-                    return channel.id
-        return None
 
     async def run_daily_maintenance(self) -> dict:
         """日次メンテナンスの全ステップを実行する
@@ -181,28 +167,8 @@ class DailyMaintenanceTask:
 
         ⚠️ 報告に含めてはいけない情報: Tier, スコア, 信頼度レベル（§5.4参照）
         ⚠️ BOT_VERSION と DEPLOY_DATE を報告ヘッダに含める（§5.3参照）
-        ⚠️ チャンネルNoneチェック必須（COMMON_MISTAKES N-05, §18）
+        ⚠️ §38: Forum Thread への投稿は shiori_posting に委譲
         """
-        # チャンネル検索
-        if not self.shiori_channel_id:
-            self.shiori_channel_id = await self.find_shiori_channel()
-
-        if not self.shiori_channel_id:
-            logger.warning(
-                "[DailyMaintenance] Shiori channel not found, "
-                "skipping daily report"
-            )
-            return
-
-        # N-05: bot.get_channel() の戻り値がNoneになりうる
-        channel = self.bot.get_channel(self.shiori_channel_id)
-        if channel is None:
-            logger.error(
-                f"[DailyMaintenance] Channel {self.shiori_channel_id} "
-                f"not found in cache"
-            )
-            return
-
         today = datetime.now(tz=JST).strftime("%Y-%m-%d")
 
         # 設定値取得（configモジュールから直接）
@@ -231,11 +197,14 @@ class DailyMaintenanceTask:
 
         report += f"\n所感: {observation}\n\n次回整理: 明日 18:00"
 
-        try:
-            await channel.send(report)
+        # §38: Forum Thread への投稿は共通ヘルパーに委譲
+        success = await post_to_shiori_thread(
+            self.bot, report, caller="DailyMaintenance"
+        )
+        if success:
             logger.info("[DailyMaintenance] Daily report posted")
-        except Exception as e:
-            logger.error(f"[DailyMaintenance] Report post failed: {e}")
+        else:
+            logger.error("[DailyMaintenance] Daily report post failed")
 
     # ========== 内部メソッド ==========
 
@@ -309,7 +278,6 @@ class DailyMaintenanceTask:
         P1-1修正: タイムスタンプ形式を JST YYYY-MM-DD に統一。
         trust.py の strptime("%Y-%m-%d") と整合させる。
         """
-        user_id_str = str(msg.author.id)
         profile = self.bot.member_profile.get_profile(user_id=msg.author.id)
         if profile is not None:
             # P1-1: UTC→JST変換し、trust.py と同じ YYYY-MM-DD 形式で記録
