@@ -398,18 +398,60 @@ class LLMClient:
             return "あっ、えっと……ごめんなさい、ちょっと調子が悪いみたいです📎"
 
     @staticmethod
-    def format_discussion_summary(t7_result: dict) -> str:
-        """T7（議論要約）の出力を栞のDiscord応答形式にフォーマットする。
+    def is_valid_discussion_summary(t7_result: dict) -> bool:
+        """T7結果が投稿に値する品質かをバリデーションする。
 
-        散文形式で出力する。箇条書きにはしない。
+        論題が不明・空・プレースホルダの場合は無効と判定し、
+        投稿を抑制する（仕様変更: 2026-02-20）。
 
         Args:
             t7_result: call_template("T7", ...) の戻り値
 
         Returns:
-            Discord送信用のフォーマット済み文字列
+            True: 投稿可能  False: 投稿すべきでない
         """
-        topic = t7_result.get("topic", "（論題不明）")
+        topic = t7_result.get("topic", "")
+        if not topic or not topic.strip():
+            return False
+
+        # 無効な論題パターン（LLMが判別できなかった場合の典型出力）
+        invalid_patterns = [
+            "論題不明", "不明", "論題", "なし", "N/A", "unknown",
+            "（論題不明）", "(論題不明)", "特定できません",
+        ]
+        topic_stripped = topic.strip().strip("（）()「」")
+        if topic_stripped in invalid_patterns:
+            return False
+
+        # positionsも空の場合は無効（論題だけあっても中身がない）
+        positions = t7_result.get("positions", [])
+        if not positions:
+            return False
+
+        return True
+
+    @staticmethod
+    def format_discussion_summary(t7_result: dict) -> str | None:
+        """T7（議論要約）の出力を栞のDiscord応答形式にフォーマットする。
+
+        散文形式で出力する。箇条書きにはしない。
+        論題不明の場合は None を返す（投稿抑制）。
+
+        Args:
+            t7_result: call_template("T7", ...) の戻り値
+
+        Returns:
+            Discord送信用のフォーマット済み文字列。無効な場合は None。
+        """
+        if not ShioriLLM.is_valid_discussion_summary(t7_result):
+            logger.info(
+                "[T7] Summary suppressed: invalid topic=%r, positions=%d",
+                t7_result.get("topic", ""),
+                len(t7_result.get("positions", [])),
+            )
+            return None
+
+        topic = t7_result.get("topic", "")
         positions = t7_result.get("positions", [])
         unresolved = t7_result.get("unresolved", [])
 

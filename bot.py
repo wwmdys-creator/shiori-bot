@@ -438,6 +438,9 @@ class ShioriBot(discord.Client):
                     # botメッセージ除外 + トリガーメッセージ自身を除外
                     if msg.author.bot or msg.id == message.id:
                         continue
+                    # 空contentメッセージ除外（画像・ファイルのみ等）
+                    if not msg.content or not msg.content.strip():
+                        continue
                     t7_messages.append({
                         "author_display_name": msg.author.display_name,
                         "content": msg.content,
@@ -472,6 +475,16 @@ class ShioriBot(discord.Client):
             )
             if t7_result:
                 summary_text = self.llm.format_discussion_summary(t7_result)
+                # 論題不明の場合は投稿しない（仕様変更: 2026-02-20）
+                if summary_text is None:
+                    logger.info("[T7] Summary suppressed: topic unidentifiable")
+                    await message.channel.send(
+                        "📎 議論の論題をうまく特定できませんでした……"
+                        "もう少し具体的なテーマで話が進んでから"
+                        "お声がけくださいね。"
+                    )
+                    self.rate_limiter.record_response(message.channel.id)
+                    return
                 await message.channel.send(summary_text)
                 await self.reactions.add_reaction(message, "discussion")
                 sum_result = await self.trust.record_interaction(user_id, "summary_request")
