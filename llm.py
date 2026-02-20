@@ -443,7 +443,7 @@ class LLMClient:
         Returns:
             Discord送信用のフォーマット済み文字列。無効な場合は None。
         """
-        if not ShioriLLM.is_valid_discussion_summary(t7_result):
+        if not LLMClient.is_valid_discussion_summary(t7_result):
             logger.info(
                 "[T7] Summary suppressed: invalid topic=%r, positions=%d",
                 t7_result.get("topic", ""),
