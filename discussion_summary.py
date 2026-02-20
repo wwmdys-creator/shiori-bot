@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 # LLMモデル（デュアルモデルアーキテクチャ: Sonnet for creative tasks）
-MAIN_MODEL = "claude-sonnet-4-20250514"
+MAIN_MODEL = "claude-sonnet-4-6"
 SUMMARY_MAX_TOKENS = 1000
 
 # フェッチ制限（Q8/Q9決定: チャンネルのみ、直近100件）

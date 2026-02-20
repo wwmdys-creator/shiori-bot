@@ -306,7 +306,7 @@ async def check_profile_update(
 
     try:
         response = await haiku_client.messages.create(
-            model="claude-haiku-4-5-20250901",
+            model="claude-haiku-4-5-20251001",
             max_tokens=prompt.max_tokens,
             system=prompt.system,
             messages=[{

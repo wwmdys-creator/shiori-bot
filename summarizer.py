@@ -106,6 +106,7 @@ class LinkSummarizer:
             user=user_prompt,
             max_tokens=300,
             temperature=0.5,
+            use_sonnet=True,  # T5: リンク要約はSonnetで実行
         )
 
         if result is None:

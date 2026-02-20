@@ -24,7 +24,7 @@ from pathlib import Path
 # =====================================================================
 
 # --- LLM モデル ---
-MAIN_MODEL: str = os.getenv("MAIN_MODEL", "claude-sonnet-4-20250514")
+MAIN_MODEL: str = os.getenv("MAIN_MODEL", "claude-sonnet-4-6")
 TIER1_MODEL: str = os.getenv("TIER1_MODEL", "claude-haiku-4-5-20251001")
 
 # --- Haiku 文字数制限 ---

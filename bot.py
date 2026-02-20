@@ -440,6 +440,7 @@ class ShioriBot(discord.Client):
                 ),
                 max_tokens=500,
                 temperature=0.5,
+                use_sonnet=True,  # T7: 議論要約はSonnetで実行
             )
             if t7_result:
                 summary_text = self.llm.format_discussion_summary(t7_result)

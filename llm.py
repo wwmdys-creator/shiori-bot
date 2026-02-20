@@ -132,10 +132,13 @@ class LLMClient:
         user: str,
         max_tokens: int = 200,
         temperature: float = 0.3,
+        use_sonnet: bool = False,
     ) -> dict | None:
-        """T1-T8 テンプレート呼び出し（Haiku）。
+        """T1-T8 テンプレート呼び出し。
 
         prompt_templates.md のインターフェース契約に準拠。
+        デフォルトは Haiku（TIER1_MODEL）。T5/T7 は use_sonnet=True で
+        Sonnet（MAIN_MODEL）を使用する。
         戻り値: パース済みdict。パース/API失敗時は None。
 
         Args:
@@ -144,14 +147,16 @@ class LLMClient:
             user: ユーザープロンプト文字列
             max_tokens: 最大出力トークン
             temperature: 温度パラメータ
+            use_sonnet: True の場合 Sonnet（MAIN_MODEL）を使用
         """
         try:
+            model = MAIN_MODEL if use_sonnet else TIER1_MODEL
             logger.debug(
-                "[%s] call_template: system=%d chars, user=%d chars",
-                template_name, len(system), len(user),
+                "[%s] call_template: model=%s, system=%d chars, user=%d chars",
+                template_name, model, len(system), len(user),
             )
             response = await self._client.messages.create(
-                model=TIER1_MODEL,
+                model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 system=system,
