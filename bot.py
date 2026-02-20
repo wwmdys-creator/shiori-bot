@@ -70,7 +70,7 @@ from daily_maintenance import DailyMaintenanceTask
 from weekly_monologue import WeeklyMonologueTask
 
 # v5.3-P0P1-v3: パッシブ言及ハートリアクション
-from config import contains_shiori_keyword
+from config import contains_shiori_keyword, MEMBER_SUMMARY_FETCH_LIMIT
 
 
 logger = logging.getLogger("shiori.bot")
@@ -427,10 +427,38 @@ class ShioriBot(discord.Client):
                 self.rate_limiter.record_response(message.channel.id)
                 return
 
-            # legacy T7: 一般要約フロー
+            # T7: 一般要約フロー（100件取得・botフィルタ）
+            # ⚠️ _collect_context() は20件+bot込みで要約には不十分。
+            #    handle_member_summary と同様に100件取得+botフィルタする。
+            try:
+                t7_messages: list[dict] = []
+                async for msg in message.channel.history(
+                    limit=MEMBER_SUMMARY_FETCH_LIMIT
+                ):
+                    # botメッセージ除外 + トリガーメッセージ自身を除外
+                    if msg.author.bot or msg.id == message.id:
+                        continue
+                    t7_messages.append({
+                        "author_display_name": msg.author.display_name,
+                        "content": msg.content,
+                    })
+                t7_messages.reverse()  # 時系列順（古→新）
+            except (discord.Forbidden, discord.HTTPException) as e:
+                logger.warning(f"[T7] Failed to fetch history: {e}")
+                t7_messages = []
+
+            if len(t7_messages) < 3:
+                # 人間の発言が3件未満では要約不能
+                await message.channel.send(
+                    "📎 まとめるほどの議論がまだないみたいです……"
+                    "もう少し話が進んでからお声がけくださいね。"
+                )
+                self.rate_limiter.record_response(message.channel.id)
+                return
+
             formatted_messages = "\n".join(
                 f"{m['author_display_name']}: {m['content']}"
-                for m in context_messages
+                for m in t7_messages
             )
             t7_result = await self.llm.call_template(
                 template_name="T7",
