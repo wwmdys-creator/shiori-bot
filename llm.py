@@ -46,23 +46,51 @@ def safe_parse_json(text: str) -> dict | None:
     - ```json ... ``` コードブロックを除去
     - 前後の余分なテキストを除去
     - パース失敗時は None を返す
+
+    パース優先順位（BUG FIX 2026-02-20）:
+        Phase 1: テキスト全体を直接パース（最も正確）
+        Phase 2: ネスト含む貪欲マッチ（T7等のネストJSON対応）
+        Phase 3: フラットなJSONのみ（T1等の単純テンプレート用、最終手段）
+
+    旧実装では Phase 3 → Phase 2 の順だったため、T7の
+    ``{"topic": "...", "positions": [{"member": "..."}]}`` のような
+    ネストJSONで内側の ``{"member": "..."}`` だけがマッチし、
+    topic/positions/unresolved が全て欠落していた。
     """
     # コードブロック除去
     text = re.sub(r"```json\s*", "", text)
     text = re.sub(r"```\s*", "", text)
+    text = text.strip()
 
-    # JSON部分を抽出（ネストしていない単純なオブジェクト）
-    match = re.search(r"\{[^{}]*\}", text)
-    if not match:
-        # ネストされたJSONも試行
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-
+    # Phase 1: テキスト全体を直接パース（コードブロック除去後の全体がJSONの場合）
     try:
-        return json.loads(match.group())
-    except json.JSONDecodeError:
-        return None
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Phase 2: ネストを含むJSON全体を貪欲にマッチ（DOTALLで改行も含む）
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # Phase 3: フラットなJSONのみ（最終手段、T1等の単純テンプレート用）
+    match = re.search(r"\{[^{}]*\}", text)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _load_system_prompt_file() -> str:
