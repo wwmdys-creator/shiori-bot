@@ -13,6 +13,11 @@ COMMON_MISTAKES対応:
   §12.4.4: 戻り値フォーマット厳守
   §38: Forum Thread と TextChannel を混同しない
        → 投稿は shiori_posting.post_to_shiori_thread() に委譲
+
+変更履歴:
+  2026-02-23: Step 6「動的メモ統合」追加（memos_consolidated を常に0件返す不具合修正）
+              _consolidate_dynamic_memos() を実装。
+              config.MEMO_CONSOLIDATION_THRESHOLD (デフォルト10) 件超で Haiku 統合。
 """
 
 import logging
@@ -24,6 +29,18 @@ from shiori_posting import post_to_shiori_thread
 logger = logging.getLogger("shiori.daily_maintenance")
 
 JST = timezone(timedelta(hours=9))
+
+# 動的メモ統合の閾値（この件数を超えたメンバーが統合対象）
+# config に MEMO_CONSOLIDATION_THRESHOLD が定義されていればそちらを優先
+_MEMO_CONSOLIDATION_THRESHOLD_DEFAULT = 10
+
+# Haiku への統合依頼プロンプト（call_haiku ではなく _client.messages.create を直接使用）
+_MEMO_CONSOLIDATION_SYSTEM = (
+    "あなたはメモ整理アシスタントです。"
+    "渡されたメモ群を重複排除し、情報を失わずに簡潔に統合してください。"
+    "出力フォーマット: 各メモを改行区切りで出力。1件あたり最大80文字。"
+    "先頭の日付タグ [YYYY-MM-DD] は最新日付に統一してください。"
+)
 
 
 class DailyMaintenanceTask:
@@ -41,7 +58,8 @@ class DailyMaintenanceTask:
                    - bot.guilds: サーバー一覧
                    - bot.member_profile: MemberProfileManager
                    - bot.predictions: PredictionManager
-                   - bot.llm_client: Anthropic APIクライアント
+                   - bot.llm: LLMClient（._client で AsyncAnthropic にアクセス）
+                   - bot.trust: TrustManager
                    - bot.config: 設定オブジェクト（BOT_VERSION, DEPLOY_DATE等）
         """
         self.bot = bot
@@ -67,13 +85,14 @@ class DailyMaintenanceTask:
             3. メンバープロファイルの更新
             4. 好感度の日次減衰適用
             5. 未解決予測ハイライトの選定
+            6. 動的メモの統合・重複排除（新規追加）
 
         Returns:
             dict — §12.4.4 形式の統計情報:
                 total_messages_scanned: スキャン件数
                 new_predictions: 新規予測数
                 profiles_updated: 更新メンバー数
-                memos_consolidated: 統合メモ数
+                memos_consolidated: 統合メモ処理を行ったメンバー数
                 highlights: list[dict] (§12.4.3 形式)
                 trust_decays_applied: 減衰適用数
 
@@ -148,6 +167,14 @@ class DailyMaintenanceTask:
         except Exception as e:
             logger.error(
                 f"[DailyMaintenance] Highlight selection failed: {e}"
+            )
+
+        # ===== Step 6: 動的メモ統合（新規追加） =====
+        try:
+            stats["memos_consolidated"] = await self._consolidate_dynamic_memos()
+        except Exception as e:
+            logger.error(
+                f"[DailyMaintenance] Memo consolidation failed: {e}"
             )
 
         # ===== データ保存 =====
@@ -332,6 +359,117 @@ class DailyMaintenanceTask:
             logger.error(f"[DailyMaintenance] Highlight selection: {e}")
             return []
 
+    async def _consolidate_dynamic_memos(self) -> int:
+        """動的メモが閾値を超えたメンバーのメモをHaikuで統合する（Step 6）
+
+        閾値は config.MEMO_CONSOLIDATION_THRESHOLD（デフォルト10）。
+        超過メンバーのメモ全件をHaikuに渡し、重複排除・要約した
+        結果（最大5件）で上書きする。
+
+        エラー隔離: 1メンバーの失敗は他メンバーの処理に影響しない（N-05）。
+        LLM失敗時はそのメンバーをスキップし、元のメモを保持する。
+
+        Returns:
+            統合処理を実行したメンバー数（LLM失敗でスキップしたメンバーは含まない）
+        """
+        threshold = getattr(
+            shiori_config,
+            "MEMO_CONSOLIDATION_THRESHOLD",
+            _MEMO_CONSOLIDATION_THRESHOLD_DEFAULT,
+        )
+        tier1_model = getattr(
+            shiori_config, "TIER1_MODEL", "claude-haiku-4-5-20251001"
+        )
+
+        consolidated_count = 0
+        today_str = datetime.now(tz=JST).strftime("%Y-%m-%d")
+
+        profiles: dict = self.bot.member_profile.profiles
+
+        for uid, profile in profiles.items():
+            memos: list[str] = profile.get("dynamic_memos", [])
+            if len(memos) <= threshold:
+                continue
+
+            display_name = profile.get("display_name", uid)
+            logger.info(
+                "[DailyMaintenance] Consolidating memos for %s (%d memos > threshold %d)",
+                display_name,
+                len(memos),
+                threshold,
+            )
+
+            try:
+                consolidated = await self._call_haiku_consolidate(
+                    memos=memos,
+                    display_name=display_name,
+                    today_str=today_str,
+                    model=tier1_model,
+                )
+                if consolidated:
+                    profile["dynamic_memos"] = consolidated
+                    consolidated_count += 1
+                    logger.info(
+                        "[DailyMaintenance] Memos consolidated for %s: %d → %d",
+                        display_name,
+                        len(memos),
+                        len(consolidated),
+                    )
+            except Exception as e:
+                # 1メンバーの失敗は全体に影響させない（N-05）
+                logger.error(
+                    "[DailyMaintenance] Memo consolidation failed for %s: %s",
+                    display_name,
+                    e,
+                )
+                continue
+
+        return consolidated_count
+
+    async def _call_haiku_consolidate(
+        self,
+        memos: list[str],
+        display_name: str,
+        today_str: str,
+        model: str,
+    ) -> list[str]:
+        """Haikuを呼び出してメモ群を統合する
+
+        Args:
+            memos: 統合対象の動的メモリスト（日付タグ付き）
+            display_name: ログ用のメンバー表示名
+            today_str: 統合後メモの日付タグに使う YYYY-MM-DD 文字列
+            model: 使用するHaikuモデルID
+
+        Returns:
+            統合後のメモリスト（最大5件）。空リストの場合は呼び出し元でスキップ。
+
+        Raises:
+            Exception: LLM呼び出し失敗時（呼び出し元でキャッチ）
+        """
+        memo_text = "\n".join(memos)
+        user_prompt = (
+            f"以下は「{display_name}」さんの動的メモです。\n"
+            f"重複・類似内容を統合し、最大5件の簡潔なメモに整理してください。\n"
+            f"各メモの先頭は [{today_str}] とし、改行区切りで出力してください。\n\n"
+            f"【メモ一覧】\n{memo_text}"
+        )
+
+        response = await self.bot.llm._client.messages.create(
+            model=model,
+            max_tokens=512,
+            system=_MEMO_CONSOLIDATION_SYSTEM,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+
+        raw_output = response.content[0].text.strip()
+        if not raw_output:
+            return []
+
+        # 改行で分割し、空行・前後空白を除去して最大5件に絞る
+        lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
+        return lines[:5]
+
     def _format_highlights(self, highlights: list[dict]) -> str:
         """ハイライトリストを報告用テキストに整形する
 
@@ -364,7 +502,8 @@ class DailyMaintenanceTask:
                 f"2045年から来た研究者「栞」として1〜2文の短い所感を書いてください。\n"
                 f"投稿確認数: {stats.get('total_messages_scanned', 0)}件\n"
                 f"新規予測: {stats.get('new_predictions', 0)}件\n"
-                f"プロファイル更新: {stats.get('profiles_updated', 0)}名\n\n"
+                f"プロファイル更新: {stats.get('profiles_updated', 0)}名\n"
+                f"メモ統合: {stats.get('memos_consolidated', 0)}名分\n\n"
                 f"条件:\n"
                 f"- 1〜2文で簡潔に\n"
                 f"- フィールドノートの走り書き風\n"
