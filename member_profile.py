@@ -83,6 +83,25 @@ class MemberProfileManager:
         """全プロファイル辞書を返す（v4.1互換）"""
         return self._members
 
+    def _resolve_profile(self, user_id: str) -> dict | None:
+        """user_id からプロファイルを解決する（逆引きフォールバック付き）
+
+        検索順序:
+          1. self._members[uid] — 直引き（Snowflake ID or username key）
+          2. self._members.values() の username フィールドと照合
+          3. self._members.values() の user_id フィールドと照合
+        """
+        uid = str(user_id)
+        if uid in self._members:
+            return self._members[uid]
+        for profile in self._members.values():
+            if profile.get("username") == uid:
+                return profile
+        for profile in self._members.values():
+            if str(profile.get("user_id", "")) == uid:
+                return profile
+        return None
+
     def get_profile(self, user_id: str = "", **kwargs) -> dict | None:
         """
         user_id でプロファイルを取得（v4.1互換）
@@ -91,13 +110,7 @@ class MemberProfileManager:
         # kwargs から user_id を取得（キーワード引数対応）
         uid = user_id or kwargs.get("user_id", "")
         uid = str(uid)
-        if uid in self._members:
-            return self._members[uid]
-        # user_id が "pending" のメンバーは username で逆引き
-        for profile in self._members.values():
-            if profile.get("username") == uid:
-                return profile
-        return None
+        return self._resolve_profile(uid)
 
     def get_community_knowledge_text(self, compact: bool = True) -> str:
         """
@@ -231,8 +244,12 @@ class MemberProfileManager:
         動的メモを追加。日付プレフィックス [YYYY-MM-DD] を自動付与。
         """
         uid = str(user_id)
-        profile = self._members.get(uid)
+        profile = self._resolve_profile(uid)
         if not profile:
+            logger.warning(
+                "add_dynamic_memo: user_id=%s not found in %d profiles",
+                uid, len(self._members),
+            )
             return False
         memo = memo[:100]
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -250,7 +267,7 @@ class MemberProfileManager:
     ) -> bool:
         """キーワードを含む動的メモを削除"""
         uid = str(user_id)
-        profile = self._members.get(uid)
+        profile = self._resolve_profile(uid)
         if not profile:
             return False
         memos = profile.get("dynamic_memos", [])

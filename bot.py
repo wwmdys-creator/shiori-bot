@@ -914,14 +914,21 @@ class ShioriBot(discord.Client):
             )
             if result.has_learnable_info and result.extracted_info:
                 user_id = str(message.author.id)
-                await self.member_profile.add_dynamic_memo(
+                success = await self.member_profile.add_dynamic_memo(
                     user_id, result.extracted_info
                 )
-                logger.info(
-                    "Dynamic learning: user=%s, info='%s'",
-                    message.author.display_name,
-                    result.extracted_info[:50],
-                )
+                if success:
+                    logger.info(
+                        "Dynamic learning: user=%s, info='%s'",
+                        message.author.display_name,
+                        result.extracted_info[:50],
+                    )
+                else:
+                    logger.warning(
+                        "Dynamic learning: memo add FAILED for user=%s (id=%s)",
+                        message.author.display_name,
+                        user_id,
+                    )
         except Exception:
             logger.exception("Learning detection error")
 

@@ -32,7 +32,7 @@ JST = timezone(timedelta(hours=9))
 
 # 動的メモ統合の閾値（この件数を超えたメンバーが統合対象）
 # config に MEMO_CONSOLIDATION_THRESHOLD が定義されていればそちらを優先
-_MEMO_CONSOLIDATION_THRESHOLD_DEFAULT = 10
+_MEMO_CONSOLIDATION_THRESHOLD_DEFAULT = 5
 
 # Haiku への統合依頼プロンプト（call_haiku ではなく _client.messages.create を直接使用）
 _MEMO_CONSOLIDATION_SYSTEM = (
