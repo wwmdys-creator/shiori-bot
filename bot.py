@@ -379,10 +379,33 @@ class ShioriBot(discord.Client):
         # メンション部分を除去してから判定
         clean_content = re.sub(r'<@!?\d+>', '', message.content).strip()
 
-        # ─── 動的メモ整理コマンド（v5.3.1追加） ──────────────
-        # 「メモ整理」「動的メモ整理」「メモ統合」等のキーワードで手動実行
-        _MEMO_CMD_KEYWORDS = ("メモ整理", "メモ統合", "memo consolidat")
-        if any(kw in clean_content.lower() for kw in _MEMO_CMD_KEYWORDS):
+        # ─── 動的メモ関連コマンド（v5.3.1追加） ──────────────
+        # 「メモ保存」→ 直近メッセージをスキャンしてメモ生成・保存
+        # 「メモ整理」「メモ統合」→ 既存メモの重複排除・統合
+        _MEMO_SAVE_KEYWORDS = ("メモ保存", "memo save", "memo scan")
+        _MEMO_CONSOLIDATE_KEYWORDS = ("メモ整理", "メモ統合", "memo consolidat")
+
+        clean_lower = clean_content.lower()
+
+        if any(kw in clean_lower for kw in _MEMO_SAVE_KEYWORDS):
+            try:
+                logger.info(
+                    "[MemoCmd] Manual memo scan requested by %s",
+                    message.author.display_name,
+                )
+                await message.channel.send("📎 メモ保存を開始します。しばらくお待ちください……")
+                report = await self.daily_maintenance_task.run_manual_memo_scan()
+                await message.channel.send(report)
+                await self.reactions.add_reaction(message, "discussion")
+            except Exception as e:
+                logger.error(f"[MemoCmd] Memo scan failed: {e}", exc_info=True)
+                await message.channel.send(
+                    "メモ保存の実行中にエラーが発生しました……📎"
+                )
+            self.rate_limiter.record_response(message.channel.id)
+            return
+
+        if any(kw in clean_lower for kw in _MEMO_CONSOLIDATE_KEYWORDS):
             try:
                 logger.info(
                     "[MemoCmd] Manual memo consolidation requested by %s",

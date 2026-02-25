@@ -642,3 +642,139 @@ class DailyMaintenanceTask:
             f"データ保存: 完了"
         )
 
+    # ========== 手動メモ保存（チャットコマンド用） ==========
+
+    async def run_manual_memo_scan(self, hours: int = 24) -> str:
+        """MAINカテゴリの直近メッセージをスキャンし、動的メモを生成・保存する
+
+        bot.py からメンション経由で呼ばれる。
+        LearningDetector を使って各メッセージから学習可能な情報を抽出し、
+        動的メモとして保存する。
+
+        Args:
+            hours: スキャンする過去の時間幅（デフォルト24時間）
+
+        Returns:
+            チャットに投稿する結果レポート文字列
+
+        COMMON_MISTAKES N-05: チャンネルごと・メッセージごとにエラー隔離
+        """
+        logger.info("[ManualMemoScan] Starting manual memo scan (%dh)", hours)
+
+        now = datetime.now(tz=JST)
+        since = now - timedelta(hours=hours)
+
+        scan_count = 0
+        trigger_count = 0
+        memo_added_count = 0
+        member_memo_map: dict[str, list[str]] = {}  # display_name → [memo_texts]
+        errors = 0
+
+        channels = self._get_monitored_channels()
+        if not channels:
+            return (
+                "📎 メモ保存（手動実行）\n\n"
+                "⚠️ MAINカテゴリのチャンネルが見つかりませんでした。"
+            )
+
+        for channel in channels:
+            try:
+                async for msg in channel.history(after=since, limit=500):
+                    if msg.author.bot:
+                        continue
+
+                    scan_count += 1
+
+                    # Snowflake ID 登録（メモ保存に必要）
+                    self.bot.member_profile.register_snowflake(
+                        str(msg.author.id), msg.author.name
+                    )
+
+                    content = msg.content or ""
+                    if not content or len(content) < 10:
+                        continue
+
+                    # LearningDetector で学習可能情報を検出
+                    try:
+                        result = await self.bot.learning_detector.detect(
+                            content, msg.author.display_name
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "[ManualMemoScan] detect error: %s", e
+                        )
+                        errors += 1
+                        continue
+
+                    if not (result.has_learnable_info and result.extracted_info):
+                        continue
+
+                    trigger_count += 1
+
+                    # メモ追加
+                    try:
+                        user_id = str(msg.author.id)
+                        success = await self.bot.member_profile.add_dynamic_memo(
+                            user_id, result.extracted_info
+                        )
+                        if success:
+                            memo_added_count += 1
+                            display = msg.author.display_name
+                            if display not in member_memo_map:
+                                member_memo_map[display] = []
+                            member_memo_map[display].append(
+                                result.extracted_info[:60]
+                            )
+                            logger.info(
+                                "[ManualMemoScan] Memo added: %s → '%s'",
+                                display, result.extracted_info[:50],
+                            )
+                    except Exception as e:
+                        logger.error(
+                            "[ManualMemoScan] add_dynamic_memo error: %s", e
+                        )
+                        errors += 1
+
+            except Exception as e:
+                logger.error(
+                    "[ManualMemoScan] Channel scan error in %s: %s",
+                    channel.name, e,
+                )
+                errors += 1
+                continue
+
+        # データ保存
+        saved = False
+        if memo_added_count > 0:
+            try:
+                await self.bot.member_profile.save()
+                saved = True
+                logger.info("[ManualMemoScan] Profile data saved")
+            except Exception as e:
+                logger.error(f"[ManualMemoScan] Save failed: {e}")
+
+        # メンバー別の詳細
+        detail_lines = []
+        for display_name, memos in member_memo_map.items():
+            detail_lines.append(f"  {display_name}: {len(memos)}件")
+            for m in memos[:3]:  # 各メンバー最大3件表示
+                detail_lines.append(f"    └ {m}")
+            if len(memos) > 3:
+                detail_lines.append(f"    └ …他{len(memos) - 3}件")
+
+        detail_text = "\n".join(detail_lines) if detail_lines else "  （該当なし）"
+        save_text = "完了" if saved else ("対象なし" if memo_added_count == 0 else "失敗")
+
+        return (
+            f"📎 メモ保存（手動実行）\n\n"
+            f"スキャン範囲: 直近{hours}時間 / "
+            f"{len(channels)}チャンネル\n"
+            f"スキャン件数: {scan_count}件\n"
+            f"トリガー検出: {trigger_count}件\n"
+            f"メモ追加: {memo_added_count}件\n"
+            f"{'エラー: ' + str(errors) + '件' if errors else ''}\n\n"
+            f"追加されたメモ:\n{detail_text}\n\n"
+            f"データ保存: {save_text}"
+        )
+
+
