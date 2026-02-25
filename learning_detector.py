@@ -54,6 +54,7 @@ _NO_LEARNING = LearningResult(
 class LearningDetector:
     """学習対象検出"""
 
+    # 基本トリガー（個人情報・生活変化）
     TRIGGER_PATTERNS: list[re.Pattern] = [
         re.compile(r"最近"),
         re.compile(r"転職"),
@@ -65,6 +66,31 @@ class LearningDetector:
         re.compile(r"始めた"),
         re.compile(r"やめた"),
         re.compile(r"推し"),
+        # v5.3.1: シンギュラリティサーバー向け拡張
+        # 意見・見解の表明
+        re.compile(r"と思[うっ]"),
+        re.compile(r"だと[思考]"),
+        re.compile(r"と考え"),
+        re.compile(r"気がする"),
+        re.compile(r"予[測想]"),
+        re.compile(r"[楽悲]観"),
+        re.compile(r"信じ"),
+        re.compile(r"期待"),
+        re.compile(r"懸念"),
+        re.compile(r"仮説"),
+        # 技術的スタンス
+        re.compile(r"使ってみ"),
+        re.compile(r"試し[てた]"),
+        re.compile(r"触っ[てた]"),
+        re.compile(r"作っ[てた]"),
+        re.compile(r"実装"),
+        re.compile(r"個人的に"),
+        re.compile(r"自分[はの]"),
+        # 生活・状況の共有
+        re.compile(r"仕事"),
+        re.compile(r"勉強"),
+        re.compile(r"読[んめ]"),
+        re.compile(r"買っ"),
     ]
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -78,15 +104,21 @@ class LearningDetector:
         self,
         message: str,
         author_name: str,
+        skip_trigger: bool = False,
     ) -> LearningResult:
         """
         学習対象を検出。
         Step 1: has_trigger() でキーワードチェック
         Step 2: Haikuでカテゴリ分類
         Step 3: none以外ならHaikuで情報抽出
+
+        Args:
+            message: メッセージ本文
+            author_name: 投稿者表示名
+            skip_trigger: True の場合 Step 1 をスキップ（手動スキャン用）
         """
         # Step 1: 正規表現プレチェック（F-15）
-        if not self.has_trigger(message):
+        if not skip_trigger and not self.has_trigger(message):
             return _NO_LEARNING
 
         # F-04: 切り詰め

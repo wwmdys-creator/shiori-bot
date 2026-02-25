@@ -23,6 +23,8 @@ COMMON_MISTAKES対応:
 import logging
 from datetime import datetime, timedelta, timezone
 
+import discord
+
 import config as shiori_config
 from shiori_posting import post_to_shiori_thread
 
@@ -114,7 +116,13 @@ class DailyMaintenanceTask:
 
         # ===== Step 1-3: チャンネル走査・予測検出・プロファイル更新 =====
         channels = self._get_monitored_channels()
-        for channel in channels:
+        forum_threads = await self._get_forum_threads()
+        all_targets = channels + forum_threads
+        logger.info(
+            "[DailyMaint] Scan targets: %d channels + %d forum threads",
+            len(channels), len(forum_threads),
+        )
+        for channel in all_targets:
             try:
                 async for msg in channel.history(after=since, limit=500):
                     if msg.author.bot:
@@ -246,6 +254,46 @@ class DailyMaintenanceTask:
                 ):
                     channels.append(channel)
         return channels
+
+    async def _get_forum_threads(self) -> list:
+        """全ギルドのフォーラムチャンネル内のアクティブスレッド一覧を返す
+
+        §38: ForumChannel 内の Thread は guild.text_channels に含まれない。
+        guild.threads はキャッシュ済みスレッドのみのため不十分。
+        guild.fetch_active_threads() で API から全アクティブスレッドを取得する。
+
+        Shiori_ch（SHIORI_THREAD_ID）は除外する（Bot自身の出力チャンネル）。
+
+        Returns:
+            discord.Thread のリスト
+        """
+        shiori_tid = getattr(shiori_config, "SHIORI_THREAD_ID", 0)
+        threads = []
+        for guild in self.bot.guilds:
+            try:
+                # API から全アクティブスレッドを取得
+                result = await guild.fetch_active_threads()
+                active_threads = result.threads
+            except Exception as e:
+                logger.warning(
+                    "[DailyMaint] fetch_active_threads failed for %s: %s",
+                    guild.name, e,
+                )
+                # フォールバック: キャッシュから取得
+                active_threads = list(guild.threads)
+
+            for thread in active_threads:
+                # Bot自身の投稿先は除外
+                if thread.id == shiori_tid:
+                    continue
+                # parent が ForumChannel のスレッドのみ対象
+                # (通常のTextChannel内スレッドは除外)
+                try:
+                    if isinstance(thread.parent, discord.ForumChannel):
+                        threads.append(thread)
+                except Exception:
+                    continue
+        return threads
 
     def _is_prediction_candidate(self, content: str) -> bool:
         """予測投稿の候補か簡易判定する
@@ -651,6 +699,10 @@ class DailyMaintenanceTask:
         LearningDetector を使って各メッセージから学習可能な情報を抽出し、
         動的メモとして保存する。
 
+        手動スキャンでは30文字以上のメッセージでトリガーフィルタをスキップし、
+        Haikuに直接判定させる（自動学習より積極的に検出）。
+        ただしHaiku呼び出し上限（_MAX_MANUAL_HAIKU_CALLS）を設けてコスト制御。
+
         Args:
             hours: スキャンする過去の時間幅（デフォルト24時間）
 
@@ -659,6 +711,8 @@ class DailyMaintenanceTask:
 
         COMMON_MISTAKES N-05: チャンネルごと・メッセージごとにエラー隔離
         """
+        _MAX_MANUAL_HAIKU_CALLS = 60  # 手動スキャン1回あたりのHaiku呼び出し上限
+
         logger.info("[ManualMemoScan] Starting manual memo scan (%dh)", hours)
 
         now = datetime.now(tz=JST)
@@ -667,17 +721,26 @@ class DailyMaintenanceTask:
         scan_count = 0
         trigger_count = 0
         memo_added_count = 0
+        haiku_calls = 0
         member_memo_map: dict[str, list[str]] = {}  # display_name → [memo_texts]
         errors = 0
+        skipped_by_limit = False
 
         channels = self._get_monitored_channels()
-        if not channels:
+        forum_threads = await self._get_forum_threads()
+        # テキストチャンネル + フォーラムスレッドを統合
+        all_targets = channels + forum_threads
+
+        if not all_targets:
             return (
                 "📎 メモ保存（手動実行）\n\n"
-                "⚠️ MAINカテゴリのチャンネルが見つかりませんでした。"
+                "⚠️ スキャン対象のチャンネル/スレッドが見つかりませんでした。"
             )
 
-        for channel in channels:
+        ch_count = len(channels)
+        ft_count = len(forum_threads)
+
+        for channel in all_targets:
             try:
                 async for msg in channel.history(after=since, limit=500):
                     if msg.author.bot:
@@ -695,10 +758,20 @@ class DailyMaintenanceTask:
                         continue
 
                     # LearningDetector で学習可能情報を検出
+                    # 手動スキャン: 30文字以上はトリガーフィルタをスキップし
+                    # Haikuに直接判定させる（自動学習より積極的に検出）
+                    if haiku_calls >= _MAX_MANUAL_HAIKU_CALLS:
+                        skipped_by_limit = True
+                        continue
+
                     try:
+                        skip = len(content) >= 30
                         result = await self.bot.learning_detector.detect(
-                            content, msg.author.display_name
+                            content, msg.author.display_name,
+                            skip_trigger=skip,
                         )
+                        if skip:
+                            haiku_calls += 1
                     except Exception as e:
                         logger.debug(
                             "[ManualMemoScan] detect error: %s", e
@@ -764,15 +837,22 @@ class DailyMaintenanceTask:
 
         detail_text = "\n".join(detail_lines) if detail_lines else "  （該当なし）"
         save_text = "完了" if saved else ("対象なし" if memo_added_count == 0 else "失敗")
+        limit_text = (
+            f"\n⚠️ Haiku呼び出し上限（{_MAX_MANUAL_HAIKU_CALLS}件）に達したため"
+            f"一部メッセージをスキップしました。"
+            if skipped_by_limit else ""
+        )
 
         return (
             f"📎 メモ保存（手動実行）\n\n"
             f"スキャン範囲: 直近{hours}時間 / "
-            f"{len(channels)}チャンネル\n"
+            f"{ch_count}チャンネル + {ft_count}フォーラムスレッド\n"
             f"スキャン件数: {scan_count}件\n"
+            f"Haiku判定: {haiku_calls}件\n"
             f"トリガー検出: {trigger_count}件\n"
             f"メモ追加: {memo_added_count}件\n"
-            f"{'エラー: ' + str(errors) + '件' if errors else ''}\n\n"
+            f"{'エラー: ' + str(errors) + '件' if errors else ''}"
+            f"{limit_text}\n\n"
             f"追加されたメモ:\n{detail_text}\n\n"
             f"データ保存: {save_text}"
         )
