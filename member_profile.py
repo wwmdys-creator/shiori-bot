@@ -40,9 +40,33 @@ class MemberProfileManager:
 
     def __init__(self) -> None:
         self._members: dict[str, dict] = {}
-        # key: user_id (Discord Snowflake ID string), value: profile dict
+        # key: user_id (username string from members_seed.md), value: profile dict
         self._raw_content: str = ""
         self._file_path: str = ""
+        # Snowflake ID → profile key のランタイムマッピング
+        # members_seed.md の user_id が username 文字列のため、
+        # Discord Snowflake ID からプロファイルを引くには変換が必要
+        self._snowflake_map: dict[str, str] = {}
+
+    def register_snowflake(self, snowflake_id: str, username: str) -> None:
+        """Discord Snowflake ID と username の対応をランタイム登録する
+
+        bot.py の on_message() から呼ばれ、message.author.id →
+        message.author.name のマッピングを蓄積する。
+        members_seed.md の user_id がユーザー名文字列のため、
+        Snowflake ID → ユーザー名 → プロファイルの変換チェーンを構築。
+
+        Args:
+            snowflake_id: Discord Snowflake ID (str)
+            username: Discord username (message.author.name)
+        """
+        sid = str(snowflake_id)
+        if sid not in self._snowflake_map:
+            self._snowflake_map[sid] = username
+            logger.debug(
+                "Snowflake registered: %s → %s (total: %d)",
+                sid, username, len(self._snowflake_map),
+            )
 
     # ================================================================
     # 読み込み / 書き出し
@@ -84,16 +108,28 @@ class MemberProfileManager:
         return self._members
 
     def _resolve_profile(self, user_id: str) -> dict | None:
-        """user_id からプロファイルを解決する（逆引きフォールバック付き）
+        """user_id からプロファイルを解決する（Snowflake → username 変換付き）
 
         検索順序:
-          1. self._members[uid] — 直引き（Snowflake ID or username key）
-          2. self._members.values() の username フィールドと照合
-          3. self._members.values() の user_id フィールドと照合
+          1. self._members[uid] — 直引き（username key）
+          2. self._snowflake_map[uid] → username → 直引き（Snowflake ID 変換）
+          3. self._members.values() の username フィールドと照合
+          4. self._members.values() の user_id フィールドと照合
         """
         uid = str(user_id)
+        # 1. 直引き（usernameキーの場合）
         if uid in self._members:
             return self._members[uid]
+        # 2. Snowflake ID → username → 直引き
+        mapped_username = self._snowflake_map.get(uid)
+        if mapped_username and mapped_username in self._members:
+            return self._members[mapped_username]
+        # 3. username フィールド照合（Snowflake マップ経由）
+        if mapped_username:
+            for profile in self._members.values():
+                if profile.get("username") == mapped_username:
+                    return profile
+        # 4. 旧来のフォールバック（username/user_id フィールド直接照合）
         for profile in self._members.values():
             if profile.get("username") == uid:
                 return profile

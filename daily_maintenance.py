@@ -495,24 +495,31 @@ class DailyMaintenanceTask:
 
         バックグラウンドタスクなのでHaikuモデルを使用。
         生成失敗時はフォールバックテキストを返す。
+
+        v5.3.1: 所感を3〜4文に拡充（従来は1〜2文）。
         """
         try:
             prompt = (
                 f"以下の日次整理結果を踏まえて、"
-                f"2045年から来た研究者「栞」として1〜2文の短い所感を書いてください。\n"
+                f"2045年から来た研究者「栞」としてフィールドノートの所感を書いてください。\n"
                 f"投稿確認数: {stats.get('total_messages_scanned', 0)}件\n"
                 f"新規予測: {stats.get('new_predictions', 0)}件\n"
                 f"プロファイル更新: {stats.get('profiles_updated', 0)}名\n"
                 f"メモ統合: {stats.get('memos_consolidated', 0)}名分\n\n"
                 f"条件:\n"
-                f"- 1〜2文で簡潔に\n"
+                f"- 3〜4文で書くこと（短すぎず長すぎず）\n"
+                f"- 1文目は今日のデータの全体的な印象\n"
+                f"- 2〜3文目は観測から感じた傾向や気づき、"
+                f"2045年の視点からの比較や感慨\n"
+                f"- 最後の文は明日への期待や次に注目したいテーマ\n"
                 f"- フィールドノートの走り書き風\n"
+                f"- 「# 栞の日誌より」の見出しは不要\n"
                 f"- メンバー名やスコアに言及しない\n"
             )
 
             response = await self.bot.llm._client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=200,
+                max_tokens=400,
                 temperature=0.7,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -522,7 +529,11 @@ class DailyMaintenanceTask:
             logger.warning(
                 f"[DailyMaintenance] Observation generation failed: {e}"
             )
-            return "今日も観測データの整理を完了しました📎"
+            return (
+                "今日も観測データの整理を完了しました。"
+                "2045年の私たちの時代から振り返ると、"
+                "この時期の予測活動の活発さには改めて驚かされます📎"
+            )
 
     async def _save_data(self) -> None:
         """データファイルを保存する"""
@@ -535,3 +546,99 @@ class DailyMaintenanceTask:
             await self.bot.predictions.save()
         except Exception as e:
             logger.error(f"[DailyMaintenance] Predictions save failed: {e}")
+
+    # ========== 手動メモ整理（チャットコマンド用） ==========
+
+    async def run_manual_consolidation(self) -> str:
+        """手動でメモ統合を実行し、結果レポートを返す
+
+        bot.py からメンション経由で呼ばれる。
+        統合対象があればHaikuで統合し、結果を文字列で返す。
+        統合後にデータを保存する。
+
+        Returns:
+            チャットに投稿する結果レポート文字列
+
+        COMMON_MISTAKES N-05: メンバーごとにエラー隔離
+        """
+        logger.info("[ManualConsolidation] Starting manual memo consolidation")
+
+        threshold = getattr(
+            shiori_config,
+            "MEMO_CONSOLIDATION_THRESHOLD",
+            _MEMO_CONSOLIDATION_THRESHOLD_DEFAULT,
+        )
+        profiles: dict = self.bot.member_profile.profiles
+
+        # 統合対象の事前チェック
+        candidates = []
+        for uid, profile in profiles.items():
+            memos = profile.get("dynamic_memos", [])
+            if len(memos) > threshold:
+                display_name = profile.get("display_name", uid)
+                candidates.append((uid, display_name, len(memos)))
+
+        if not candidates:
+            total_memos = sum(
+                len(p.get("dynamic_memos", [])) for p in profiles.values()
+            )
+            members_with_memos = sum(
+                1 for p in profiles.values()
+                if len(p.get("dynamic_memos", [])) > 0
+            )
+            return (
+                f"📎 動的メモ整理（手動実行）\n\n"
+                f"統合対象メンバー: 0名\n"
+                f"（閾値: {threshold}件超で統合）\n\n"
+                f"現在のメモ状況:\n"
+                f"  メモ保有メンバー: {members_with_memos}名\n"
+                f"  全メモ合計: {total_memos}件\n\n"
+                f"閾値を超えるメンバーがいないため、統合処理はスキップしました。"
+            )
+
+        # 統合実行
+        consolidated_count = 0
+        details = []
+
+        try:
+            consolidated_count = await self._consolidate_dynamic_memos()
+        except Exception as e:
+            logger.error(f"[ManualConsolidation] Failed: {e}")
+            return (
+                f"📎 動的メモ整理（手動実行）\n\n"
+                f"⚠️ 統合処理中にエラーが発生しました: {str(e)[:100]}\n"
+                f"統合対象: {len(candidates)}名"
+            )
+
+        # 統合後のメモ件数を収集
+        for uid, display_name, original_count in candidates:
+            profile = profiles.get(uid)
+            if profile:
+                new_count = len(profile.get("dynamic_memos", []))
+                details.append(
+                    f"  {display_name}: {original_count}件 → {new_count}件"
+                )
+
+        # データ保存
+        try:
+            await self.bot.member_profile.save()
+            logger.info("[ManualConsolidation] Profile data saved")
+        except Exception as e:
+            logger.error(f"[ManualConsolidation] Save failed: {e}")
+
+        # レポート生成
+        detail_text = "\n".join(details) if details else "  （詳細なし）"
+        total_memos_after = sum(
+            len(p.get("dynamic_memos", [])) for p in profiles.values()
+        )
+
+        return (
+            f"📎 動的メモ整理（手動実行）\n\n"
+            f"統合対象: {len(candidates)}名"
+            f"（閾値: {threshold}件超）\n"
+            f"統合完了: {consolidated_count}名\n\n"
+            f"統合結果:\n{detail_text}\n\n"
+            f"全メモ合計（統合後）: {total_memos_after}件\n"
+            f"データ保存: 完了"
+        )
+

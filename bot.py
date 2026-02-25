@@ -265,6 +265,13 @@ class ShioriBot(discord.Client):
             )
             return
 
+        # ── Snowflake ID ↔ username ランタイム登録 ──
+        # members_seed.md の user_id がユーザー名文字列のため、
+        # Discord Snowflake ID → username の対応を蓄積する
+        self.member_profile.register_snowflake(
+            str(message.author.id), message.author.name
+        )
+
         # GATE 3: メンション or 返信
         is_mention = (
             self.user.mentioned_in(message)
@@ -371,6 +378,27 @@ class ShioriBot(discord.Client):
         # P1-5: v5.3 §7 メンバー指定要約の検出（legacy T7より先にチェック）
         # メンション部分を除去してから判定
         clean_content = re.sub(r'<@!?\d+>', '', message.content).strip()
+
+        # ─── 動的メモ整理コマンド（v5.3.1追加） ──────────────
+        # 「メモ整理」「動的メモ整理」「メモ統合」等のキーワードで手動実行
+        _MEMO_CMD_KEYWORDS = ("メモ整理", "メモ統合", "memo consolidat")
+        if any(kw in clean_content.lower() for kw in _MEMO_CMD_KEYWORDS):
+            try:
+                logger.info(
+                    "[MemoCmd] Manual memo consolidation requested by %s",
+                    message.author.display_name,
+                )
+                report = await self.daily_maintenance.run_manual_consolidation()
+                await message.channel.send(report)
+                await self.reactions.add_reaction(message, "discussion")
+            except Exception as e:
+                logger.error(f"[MemoCmd] Failed: {e}", exc_info=True)
+                await message.channel.send(
+                    "メモ整理の実行中にエラーが発生しました……📎"
+                )
+            self.rate_limiter.record_response(message.channel.id)
+            return
+
         member_summary_req = detect_member_summary(clean_content)
 
         # 議論要約リクエスト？（legacy: 一般要約キーワード検出）
