@@ -259,8 +259,12 @@ class DailyMaintenanceTask:
         """全ギルドのフォーラムチャンネル内のアクティブスレッド一覧を返す
 
         §38: ForumChannel 内の Thread は guild.text_channels に含まれない。
-        guild.threads はキャッシュ済みスレッドのみのため不十分。
         guild.fetch_active_threads() で API から全アクティブスレッドを取得する。
+
+        戻り値の型はdiscord.pyバージョンにより異なる:
+          - list[Thread] を直接返す場合
+          - .threads 属性を持つオブジェクトを返す場合
+        両方に対応する。
 
         Shiori_ch（SHIORI_THREAD_ID）は除外する（Bot自身の出力チャンネル）。
 
@@ -271,28 +275,31 @@ class DailyMaintenanceTask:
         threads = []
         for guild in self.bot.guilds:
             try:
-                # API から全アクティブスレッドを取得
                 result = await guild.fetch_active_threads()
-                active_threads = result.threads
+                # discord.py バージョン互換: list or ActiveThreads object
+                if isinstance(result, list):
+                    active_threads = result
+                elif hasattr(result, "threads"):
+                    active_threads = result.threads
+                else:
+                    active_threads = list(result)  # iterable fallback
             except Exception as e:
                 logger.warning(
                     "[DailyMaint] fetch_active_threads failed for %s: %s",
                     guild.name, e,
                 )
-                # フォールバック: キャッシュから取得
                 active_threads = list(guild.threads)
 
             for thread in active_threads:
-                # Bot自身の投稿先は除外
                 if thread.id == shiori_tid:
                     continue
-                # parent が ForumChannel のスレッドのみ対象
-                # (通常のTextChannel内スレッドは除外)
                 try:
                     if isinstance(thread.parent, discord.ForumChannel):
                         threads.append(thread)
                 except Exception:
                     continue
+
+        logger.info("[DailyMaint] Found %d forum threads", len(threads))
         return threads
 
     def _is_prediction_candidate(self, content: str) -> bool:

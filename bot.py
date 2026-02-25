@@ -395,12 +395,15 @@ class ShioriBot(discord.Client):
                 )
                 await message.channel.send("📎 メモ保存を開始します。しばらくお待ちください……")
                 report = await self.daily_maintenance_task.run_manual_memo_scan()
+                # Discord 2000文字制限対策
+                if len(report) > 1950:
+                    report = report[:1950] + "\n…（省略）"
                 await message.channel.send(report)
                 await self.reactions.add_reaction(message, "discussion")
             except Exception as e:
                 logger.error(f"[MemoCmd] Memo scan failed: {e}", exc_info=True)
                 await message.channel.send(
-                    "メモ保存の実行中にエラーが発生しました……📎"
+                    f"メモ保存の実行中にエラーが発生しました……📎\n`{str(e)[:100]}`"
                 )
             self.rate_limiter.record_response(message.channel.id)
             return
@@ -417,7 +420,7 @@ class ShioriBot(discord.Client):
             except Exception as e:
                 logger.error(f"[MemoCmd] Failed: {e}", exc_info=True)
                 await message.channel.send(
-                    "メモ整理の実行中にエラーが発生しました……📎"
+                    f"メモ整理の実行中にエラーが発生しました……📎\n`{str(e)[:100]}`"
                 )
             self.rate_limiter.record_response(message.channel.id)
             return
