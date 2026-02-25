@@ -185,6 +185,30 @@ HaikuPromptRegistry.register(HaikuPrompt(
     output_type="json",
 ))
 
+# 手動スキャン用: 分類+抽出を1回のコールに統合
+HaikuPromptRegistry.register(HaikuPrompt(
+    id="learning_direct_extract",
+    system=(
+        "あなたはDiscordコミュニティのメンバー記録係です。\n"
+        "発言から、このメンバーについて覚えておくと有用な情報を抽出してください。\n"
+        "【記録すべきもの】意見、予測、関心事、使っているツール、専門知識、"
+        "経験談、仕事の話、趣味、スタンス表明、独自の分析や考察など。\n"
+        "【記録しないもの】URLのみの共有、他人の発言の引用のみ、"
+        "「草」「わかる」等の短い相槌、ニュースの転載（自分の意見なし）。\n"
+        "迷ったら記録する方向で判断してください。\n"
+        "JSON出力のみ。"
+    ),
+    user_template=(
+        "{author}の発言:\n{message}\n\n"
+        "worthがtrueなら、50文字以内で1文にまとめてください。\n"
+        "主語不要。「〜と考えている」「〜に関心がある」「〜を使っている」等の形式。\n\n"
+        '記録すべき場合: {{"worth": true, "extracted": "AIアライメント問題に楽観的な立場"}}\n'
+        '記録不要の場合: {{"worth": false, "extracted": ""}}'
+    ),
+    max_tokens=100,
+    output_type="json",
+))
+
 HaikuPromptRegistry.register(HaikuPrompt(
     id="response_type_classification",
     system="メッセージの種類を分類。JSON出力のみ。",

@@ -699,8 +699,8 @@ class DailyMaintenanceTask:
         LearningDetector を使って各メッセージから学習可能な情報を抽出し、
         動的メモとして保存する。
 
-        手動スキャンでは30文字以上のメッセージでトリガーフィルタをスキップし、
-        Haikuに直接判定させる（自動学習より積極的に検出）。
+        手動スキャンでは30文字以上のメッセージに対して detect_direct() で
+        1回のHaikuコールで分類+抽出を統合実行する（自動学習より積極的に検出）。
         ただしHaiku呼び出し上限（_MAX_MANUAL_HAIKU_CALLS）を設けてコスト制御。
 
         Args:
@@ -711,7 +711,7 @@ class DailyMaintenanceTask:
 
         COMMON_MISTAKES N-05: チャンネルごと・メッセージごとにエラー隔離
         """
-        _MAX_MANUAL_HAIKU_CALLS = 120  # 手動スキャン1回あたりのHaiku呼び出し上限
+        _MAX_MANUAL_HAIKU_CALLS = 200  # 手動スキャン1回あたりのHaiku呼び出し上限
 
         logger.info("[ManualMemoScan] Starting manual memo scan (%dh)", hours)
 
@@ -719,7 +719,7 @@ class DailyMaintenanceTask:
         since = now - timedelta(hours=hours)
 
         scan_count = 0
-        trigger_count = 0
+        detected_count = 0
         memo_added_count = 0
         haiku_calls = 0
         member_memo_map: dict[str, list[str]] = {}  # display_name → [memo_texts]
@@ -759,16 +759,15 @@ class DailyMaintenanceTask:
                         continue
 
                     # LearningDetector で学習可能情報を検出
-                    # 手動スキャン: トリガーフィルタをスキップし
-                    # Haikuに直接判定させる（自動学習より積極的に検出）
+                    # 手動スキャン: detect_direct() で分類+抽出を1回の
+                    # Haikuコールに統合（同じ上限で倍のメッセージを処理可能）
                     if haiku_calls >= _MAX_MANUAL_HAIKU_CALLS:
                         skipped_by_limit = True
                         continue
 
                     try:
-                        result = await self.bot.learning_detector.detect(
+                        result = await self.bot.learning_detector.detect_direct(
                             content, msg.author.display_name,
-                            skip_trigger=True,
                         )
                         haiku_calls += 1
                     except Exception as e:
@@ -781,7 +780,7 @@ class DailyMaintenanceTask:
                     if not (result.has_learnable_info and result.extracted_info):
                         continue
 
-                    trigger_count += 1
+                    detected_count += 1
 
                     # メモ追加
                     try:
@@ -848,7 +847,7 @@ class DailyMaintenanceTask:
             f"{ch_count}チャンネル + {ft_count}フォーラムスレッド\n"
             f"スキャン件数: {scan_count}件\n"
             f"Haiku判定: {haiku_calls}件\n"
-            f"トリガー検出: {trigger_count}件\n"
+            f"学習候補: {detected_count}件\n"
             f"メモ追加: {memo_added_count}件\n"
             f"{'エラー: ' + str(errors) + '件' if errors else ''}"
             f"{limit_text}\n\n"

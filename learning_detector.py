@@ -39,6 +39,7 @@ _CATEGORY_NORMALIZE: dict[str, str] = {
     "stance": "stance",
     "opinion": "opinion",
     "expertise": "expertise",
+    "direct": "direct",
     "speech": "speech_pattern",
     "speech_pattern": "speech_pattern",
     "relationship": "relationship",
@@ -194,4 +195,55 @@ class LearningDetector:
             category=category,
             extracted_info=extracted,
             confidence=cat_confidence,
+        )
+
+    async def detect_direct(
+        self,
+        message: str,
+        author_name: str,
+    ) -> LearningResult:
+        """分類ステップを省略し、1回のHaikuコールで直接抽出する。
+
+        手動メモスキャン向け。分類→抽出の2回呼び出しを1回に統合し、
+        同じHaiku上限でも倍のメッセージを処理できる。
+        判定基準も緩め（迷ったら記録する方針）。
+
+        Args:
+            message: メッセージ本文
+            author_name: 投稿者表示名
+
+        Returns:
+            LearningResult: extracted_info に抽出結果、category は "direct"
+        """
+        truncated = HaikuContextManager.truncate(message, HAIKU_MAX_MESSAGE_CHARS)
+
+        try:
+            raw = await self._llm.call_haiku(
+                "learning_direct_extract",
+                template_vars={
+                    "author": author_name[:30],
+                    "message": truncated[:400],
+                },
+            )
+        except Exception:
+            logger.exception("Learning direct extract Haiku failed")
+            return _NO_LEARNING
+
+        result = parse_with_default(raw, {"extracted": "", "worth": False})
+        extracted = str(result.get("extracted", ""))[:100]
+        worth = result.get("worth", True)  # パース失敗時はTrue
+
+        if not extracted or not worth:
+            return _NO_LEARNING
+
+        logger.info(
+            "Learning(direct): author=%s, info='%s'",
+            author_name,
+            extracted[:50],
+        )
+        return LearningResult(
+            has_learnable_info=True,
+            category="direct",
+            extracted_info=extracted,
+            confidence=0.7,
         )
