@@ -388,7 +388,7 @@ class ShioriBot(discord.Client):
                     "[MemoCmd] Manual memo consolidation requested by %s",
                     message.author.display_name,
                 )
-                report = await self.daily_maintenance.run_manual_consolidation()
+                report = await self.daily_maintenance_task.run_manual_consolidation()
                 await message.channel.send(report)
                 await self.reactions.add_reaction(message, "discussion")
             except Exception as e:
