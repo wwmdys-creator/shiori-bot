@@ -37,6 +37,8 @@ _CATEGORY_NORMALIZE: dict[str, str] = {
     "interest": "interest",
     "personal": "personal",
     "stance": "stance",
+    "opinion": "opinion",
+    "expertise": "expertise",
     "speech": "speech_pattern",
     "speech_pattern": "speech_pattern",
     "relationship": "relationship",

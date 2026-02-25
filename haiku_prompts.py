@@ -147,11 +147,22 @@ HaikuPromptRegistry.register(HaikuPrompt(
 
 HaikuPromptRegistry.register(HaikuPrompt(
     id="learning_category",
-    system="発言を分類。JSON出力のみ。",
+    system=(
+        "あなたはDiscordコミュニティのメンバー分析AIです。"
+        "発言から、そのメンバーについて記録・記憶すべき情報があるか分類してください。"
+        "技術や未来予測についての意見・スタンスも重要な記録対象です。"
+        "JSON出力のみ。"
+    ),
     user_template=(
-        "{author}: {message}\n\n"
-        "分類: interest(関心変化)/personal(個人情報)"
-        "/stance(立場変化)/speech(口癖)/none"
+        "{author}の発言: {message}\n\n"
+        "以下から1つ選んでください:\n"
+        "- opinion: 意見・見解・予測スタンスの表明（「〜と思う」「〜は楽観的」「AGIは2030年」等）\n"
+        "- interest: 関心・興味の表明（「最近〜にハマっている」「〜を試している」等）\n"
+        "- personal: 個人情報の開示（仕事・生活・経歴・スキル等）\n"
+        "- expertise: 専門知識・技術的知見の共有（詳しい解説、独自分析等）\n"
+        "- stance: 立場の変化（「前は〜だったが今は〜」等）\n"
+        "- none: 上記に該当しない（リンク共有のみ、相槌、短い反応等）\n\n"
+        '出力例: {{"category": "opinion", "confidence": 0.8}}'
     ),
     max_tokens=50,
     output_type="json",
@@ -159,9 +170,18 @@ HaikuPromptRegistry.register(HaikuPrompt(
 
 HaikuPromptRegistry.register(HaikuPrompt(
     id="learning_extraction",
-    system="記録すべき情報を1文で抽出。JSON出力のみ。",
-    user_template="発言: {message}\nカテゴリ: {category}",
-    max_tokens=80,
+    system=(
+        "メンバーの発言から、そのメンバーについて覚えておくべき情報を"
+        "1文（50文字以内）で簡潔に抽出してください。"
+        "主語は省略し「〜と考えている」「〜に詳しい」「〜を使っている」等の形式で。"
+        "JSON出力のみ。"
+    ),
+    user_template=(
+        "発言: {message}\n"
+        "カテゴリ: {category}\n\n"
+        '出力例: {{"extracted": "AGIの実現時期は2030年頃と予測している"}}'
+    ),
+    max_tokens=100,
     output_type="json",
 ))
 

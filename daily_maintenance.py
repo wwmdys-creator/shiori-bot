@@ -711,7 +711,7 @@ class DailyMaintenanceTask:
 
         COMMON_MISTAKES N-05: チャンネルごと・メッセージごとにエラー隔離
         """
-        _MAX_MANUAL_HAIKU_CALLS = 60  # 手動スキャン1回あたりのHaiku呼び出し上限
+        _MAX_MANUAL_HAIKU_CALLS = 120  # 手動スキャン1回あたりのHaiku呼び出し上限
 
         logger.info("[ManualMemoScan] Starting manual memo scan (%dh)", hours)
 
@@ -754,24 +754,23 @@ class DailyMaintenanceTask:
                     )
 
                     content = msg.content or ""
-                    if not content or len(content) < 10:
+                    if not content or len(content) < 30:
+                        # 手動スキャン: 30文字未満は学習対象外
                         continue
 
                     # LearningDetector で学習可能情報を検出
-                    # 手動スキャン: 30文字以上はトリガーフィルタをスキップし
+                    # 手動スキャン: トリガーフィルタをスキップし
                     # Haikuに直接判定させる（自動学習より積極的に検出）
                     if haiku_calls >= _MAX_MANUAL_HAIKU_CALLS:
                         skipped_by_limit = True
                         continue
 
                     try:
-                        skip = len(content) >= 30
                         result = await self.bot.learning_detector.detect(
                             content, msg.author.display_name,
-                            skip_trigger=skip,
+                            skip_trigger=True,
                         )
-                        if skip:
-                            haiku_calls += 1
+                        haiku_calls += 1
                     except Exception as e:
                         logger.debug(
                             "[ManualMemoScan] detect error: %s", e
